@@ -1,0 +1,31 @@
+{
+  "name": "openllm-docs",
+  "version": "0.0.1",
+  "description": "OpenLLM Documentation",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bentoml/openllm.git"
+  },
+  "author": "Aaron Pham <29749331+aarnphm@users.noreply.github.com>",
+  "license": "Apache 2.0",
+  "bugs": {
+    "url": "https://github.com/bentoml/openllm/issues"
+  },
+  "homepage": "https://github.com/bentoml/openllm#readme",
+  "dependencies": {
+    "next": "^13.4.7",
+    "nextra": "^2.8.0",
+    "nextra-theme-docs": "^2.8.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "18.11.10",
+    "typescript": "^4.9.3"
+  }
+}

@@ -9,7 +9,8 @@
     "node": ">=16"
   },
   "workspaces": [
-    "src/openllm_js"
+    "src/openllm_js",
+    "docs/"
   ],
   "private": true,
   "devDependencies": {
