@@ -583,7 +583,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
         adapter_map: dict[str, str | None] | None = attrs.pop(_adapter_mapping_key, None)
         config, server_attrs = llm_config.model_validate_click(**attrs)
         server_timeout = first_not_none(server_timeout, default=config["timeout"])
-        server_attrs.update({"working_dir": os.path.dirname(__file__), "timeout": server_timeout})
+        server_attrs.update({"working_dir": os.path.dirname(os.path.dirname(__file__)), "timeout": server_timeout})
         if _serve_grpc: server_attrs["grpc_protocol_version"] = "v1"
         # NOTE: currently, theres no development args in bentoml.Server. To be fixed upstream.
         development = server_attrs.pop("development")
