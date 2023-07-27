@@ -73,7 +73,9 @@ from bentoml._internal.models.model import ModelStore
 
 from .exceptions import OpenLLMException
 from .utils import DEBUG
+from .utils import DEBUG_ENV_VAR
 from .utils import ENV_VARS_TRUE_VALUES
+from .utils import QUIET_ENV_VAR
 from .utils import EnvVarMixin
 from .utils import LazyLoader
 from .utils import LazyType
@@ -112,16 +114,8 @@ if t.TYPE_CHECKING:
     from ._types import LiteralRuntime
     from ._types import P
 
-    ServeCommand = t.Literal["serve", "serve-grpc"]
-    OutputLiteral = t.Literal["json", "pretty", "porcelain"]
-
     TupleStr = tuple[str, ...]
-else:
-    TupleStr = tuple
-    torch = LazyLoader("torch", globals(), "torch")
-    jupytext = LazyLoader("jupytext", globals(), "jupytext")
-    nbformat = LazyLoader("nbformat", globals(), "nbformat")
-
+else: TupleStr, torch, jupytext, nbformat = tuple, LazyLoader("torch", globals(), "torch"), LazyLoader("jupytext", globals(), "jupytext"), LazyLoader("nbformat", globals(), "nbformat")
 
 # NOTE: We need to do this so that overload can register
 # correct overloads to typing registry
@@ -135,12 +129,9 @@ if sys.version_info[:2] >= (3, 12):
 else:
     from typing_extensions import override
 
-
 logger = logging.getLogger(__name__)
 
 COLUMNS = int(os.environ.get("COLUMNS", 120))
-
-_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": COLUMNS}
 
 OPENLLM_FIGLET = """\
  ██████╗ ██████╗ ███████╗███╗   ██╗██╗     ██╗     ███╗   ███╗
@@ -151,9 +142,27 @@ OPENLLM_FIGLET = """\
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝     ╚═╝
 """
 
+ServeCommand = t.Literal["serve", "serve-grpc"]
+LiteralOutput = t.Literal["json", "pretty", "porcelain"]
+
+_CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": COLUMNS}
 
 _AnyCallable = t.Callable[..., t.Any]
 FC = t.TypeVar("FC", bound=t.Union[_AnyCallable, click.Command])
+
+def _echo(text: t.Any, fg: str = "green", _with_style: bool = True, **attrs: t.Any) -> None:
+    attrs["fg"], call = fg if not get_debug_mode() else None, click.echo if not _with_style else click.secho
+    if not get_quiet_mode(): call(text, **attrs)
+
+def cli_option(*param_decls: t.Any, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    """General ``@click.option`` with some sauce.
+
+    This decorator extends the default ``@click.option`` plus a factory option to use which type of option, for example: [click, click_option_group.optgroup]
+    """
+    attrs.setdefault("help", "General option for OpenLLM CLI.")
+    factory = attrs.pop("factory", click)
+    def decorator(f: FC) -> FC: return factory.option(*param_decls, **attrs)(f)
+    return decorator
 
 def parse_device_callback(ctx: click.Context, param: click.Parameter, value: tuple[tuple[str], ...] | None) -> TupleStr | None:
     if value is None: return value
@@ -163,50 +172,22 @@ def parse_device_callback(ctx: click.Context, param: click.Parameter, value: tup
     if len(el) == 1 and el[0] == "all": return tuple(map(str, available_devices()))
     return el
 
-def _echo(text: t.Any, fg: str = "green", _with_style: bool = True, **attrs: t.Any) -> None:
-    call = click.echo
-    if _with_style:
-        attrs["fg"] = fg if not get_debug_mode() else None
-        call = click.secho
-    call(text, **attrs)
+def output_option(f: _AnyCallable | None = None, *, default_value: t.Literal["json", "pretty", "porcelain"] = "pretty", **attrs: t.Any) -> t.Callable[[FC], FC]:
+    opt = cli_option("-o", "--output", "output", type=click.Choice(["json", "pretty", "porcelain"]), default=default_value, help="Showing output type.", show_default=True, envvar="OPENLLM_OUTPUT", show_envvar=True, **attrs)
+    return opt if f is None else opt(f)
 
-def output_option(f: _AnyCallable | None = None, *, factory: t.Any = click, default_value: t.Literal["json", "pretty", "porcelain"] = "pretty") -> t.Callable[[FC], FC]:
-    opt = factory.option(
-        "-o",
-        "--output",
-        "output",
-        type=click.Choice(["json", "pretty", "porcelain"]),
-        default=default_value,
-        help="Showing output type.",
-        show_default=True,
-        envvar="OPENLLM_OUTPUT",
-        show_envvar=True,
-    )
-    if f is None: return opt
-    return opt(f)
+def machine_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    opt = cli_option("--machine", is_flag=True, default=False, hidden=True, **attrs)
+    return opt if f is None else opt(f)
 
-def machine_option(factory: t.Any) -> t.Callable[[FC], FC]:
-    return factory.option("--machine", is_flag=True, default=False, hidden=True)
+def model_id_option(f: _AnyCallable | None = None, *, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    envvar = model_env.model_id if model_env is not None else None
+    opt = cli_option("--model-id", type=click.STRING, default=None, help="Optional model_id name or path for (fine-tune) weight.", envvar=envvar, show_envvar=True if envvar is not None else False, **attrs)
+    return opt if f is None else opt(f)
 
-def model_id_option(factory: t.Any, model_env: EnvVarMixin | None = None) -> t.Callable[[FC], FC]:
-    envvar = None
-    if model_env is not None: envvar = model_env.model_id
-    return factory.option(
-        "--model-id",
-        type=click.STRING,
-        default=None,
-        help="Optional model_id name or path for (fine-tune) weight.",
-        envvar=envvar,
-        show_envvar=True if envvar is not None else False,
-    )
-
-def model_version_option(factory: t.Any) -> t.Callable[[FC], FC]:
-    return factory.option(
-        "--model-version",
-        type=click.STRING,
-        default=None,
-        help="Optional model version to save for this model. It will be inferred automatically from model-id.",
-    )
+def model_version_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    opt = cli_option("--model-version", type=click.STRING, default=None, help="Optional model version to save for this model. It will be inferred automatically from model-id.", **attrs)
+    return opt if f is None else opt(f)
 
 def workers_per_resource_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
     if value is None: return value
@@ -217,8 +198,9 @@ def workers_per_resource_callback(ctx: click.Context, param: click.Parameter, va
         except ValueError: ctx.fail(f"'workers_per_resource' only accept '{_wpr_strategies}' as possible strategies, otherwise pass in float.")
         else: return value
 
-def workers_per_resource_option(factory: t.Any, build: bool = False) -> t.Callable[[FC], FC]:
-    help_str = """Number of workers per resource assigned.
+def workers_per_resource_option(f: _AnyCallable | None = None, *, build: bool = False, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    opt = cli_option("--workers-per-resource", default=None, callback=workers_per_resource_callback, type=str, required=False,
+                 help="""Number of workers per resource assigned.
     See https://docs.bentoml.org/en/latest/guides/scheduling.html#resource-scheduling-strategy
     for more information. By default, this is set to 1.
 
@@ -227,58 +209,52 @@ def workers_per_resource_option(factory: t.Any, build: bool = False) -> t.Callab
     - ``round_robin``: Similar behaviour when setting ``--workers-per-resource 1``. This is useful for smaller models.
 
     - ``conserved``: This will determine the number of available GPU resources, and only assign one worker for the LLMRunner. For example, if ther are 4 GPUs available, then ``conserved`` is equivalent to ``--workers-per-resource 0.25``.
-    """
-    if build: help_str += """\n
+    """ + ("""\n
     **Note**: The workers value passed into 'build' will determine how the LLM can
     be provisioned in Kubernetes as well as in standalone container. This will
-    ensure it has the same effect with 'openllm start --workers ...'"""
-    return factory.option("--workers-per-resource", default=None, help=help_str, callback=workers_per_resource_callback, type=str, required=False)
+    ensure it has the same effect with 'openllm start --workers ...'""" if build else ""), **attrs)
+    return opt if f is None else opt(f)
 
+def quantize_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    envvar = model_env.quantize if model_env is not None else None
+    opt = cli_option("--quantise", "--quantize", "quantize", type=click.Choice(["int8", "int4", "gptq"]), default=None, envvar=envvar, show_envvar=True if envvar is not None else False,
+                 help="""Dynamic quantization for running this LLM.
 
-def quantize_option(factory: t.Any, build: bool = False, model_env: EnvVarMixin | None = None) -> t.Callable[[FC], FC]:
-    envvar = None
-    if model_env is not None: envvar = model_env.quantize
-    help_str = "Running this model in quantized mode." if not build else "Set quantization mode for serving in deployment."
-    help_str += "\nNOTE: Quantization is only available for PyTorch models. "
-    return factory.option(
-        "--quantise",
-        "--quantize",
-        "quantize",
-        type=click.Choice(["int8", "int4", "gptq"]),
-        default=None,
-        help=help_str,
-        envvar=envvar,
-        show_envvar=True if envvar is not None else False,
+    The following quantization strategies are supported:
+
+    - ``int8``: ``LLM.int8`` for [8-bit](https://arxiv.org/abs/2208.07339) quantization.
+
+    - ``int4``: ``SpQR`` for [4-bit](https://arxiv.org/abs/2306.03078) quantization.
+
+    - ``gptq``: ``GPTQ`` [quantization](https://arxiv.org/abs/2210.17323)
+
+    **Note** that the model can also be served with quantized weights.
+    """ + ("""
+    **Note** that this will set the mode for serving within deployment.""" if build else "") + """
+    **Note** that quantization are currently only available in *PyTorch* models.""", **attrs)
+    return opt if f is None else opt(f)
+
+def bettertransformer_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
+    envvar = model_env.bettertransformer if model_env is not None else None
+    opt = cli_option("--bettertransformer", is_flag=True, default=None, envvar=envvar, show_envvar=True if envvar is not None else False,
+        help="Apply FasterTransformer wrapper to serve model. This will applies during serving time." if not build else "Set default environment variable whether to serve this model with FasterTransformer in build time.", **attrs)
+    return opt if f is None else opt(f)
+
+def serialisation_option(f: _AnyCallable | None = None, **attrs: t.Any):
+    opt = cli_option("--serialisation", "--serialization", "serialisation_format", type=click.Choice(["safetensors", "legacy"]),
+        default="safetensors", show_default=True, show_envvar=True, envvar="OPENLLM_SERIALIZATION",
+        help="""Serialisation format for save/load LLM.
+
+        Currently the following strategies are supported:
+
+        - ``safetensors``: This will use safetensors format, which is synonymous to ``safe_serialization=True``.
+
+                           **Note** that this format might not work for every cases, and we are currently working on a conversion strategy to safetensors from arbitrary PyTorch weights.
+
+        - ``legacy``: This will use PyTorch serialisation format, often as ``.bin`` files. This should be used if the model doesn't yet support safetensors.
+        """, **attrs
     )
-
-
-def bettertransformer_option(factory: t.Any, build: bool = False, model_env: EnvVarMixin | None = None) -> t.Callable[[FC], FC]:
-    envvar = None
-    if model_env is not None: envvar = model_env.bettertransformer
-    return factory.option(
-        "--bettertransformer",
-        is_flag=True,
-        default=None,
-        help="Apply FasterTransformer wrapper to serve model. This will applies during serving time."
-        if not build
-        else "Set defaul environment variable whether to serve this model with FasterTransformer in build time.",
-        envvar=envvar,
-        show_envvar=True if envvar is not None else False,
-    )
-
-
-def serialisation_option(factory: t.Any) -> t.Callable[[FC], FC]:
-    return factory.option(
-        "--serialisation",
-        "--serialization",
-        "serialisation_format",
-        type=click.Choice(["safetensors", "legacy"]),
-        default="safetensors",
-        help="Serialisation format to save the model in. Default is safetensors, which is similar to `safe_serialization=True`. If the weight is not yet supported my safetensors, make sure to pass in '--serialisation legacy'",
-        show_default=True,
-        show_envvar=True,
-        envvar="OPENLLM_SERIALIZATION",
-    )
+    return opt if f is None else opt(f)
 
 _adapter_mapping_key = "adapter_map"
 def _id_callback(ctx: click.Context, _: click.Parameter, value: tuple[str, ...] | None) -> None:
@@ -303,15 +279,11 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
     @staticmethod
     def common_params(f: FC) -> t.Callable[[FC], FC]:
         # The following logics is similar to one of BentoMLCommandGroup
-
-        from bentoml._internal.configuration import DEBUG_ENV_VAR
-        from bentoml._internal.configuration import QUIET_ENV_VAR
-
         @cog.optgroup.group("Global options")
-        @cog.optgroup.option("-q", "--quiet", envvar=QUIET_ENV_VAR, is_flag=True, default=False, help="Suppress all output.")
-        @cog.optgroup.option( "--debug", "--verbose", "debug", envvar=DEBUG_ENV_VAR, is_flag=True, default=False, help="Print out debug logs.")
-        @cog.optgroup.option("--do-not-track", is_flag=True, default=False, envvar=analytics.OPENLLM_DO_NOT_TRACK, help="Do not send usage info")
-        @cog.optgroup.option( "--context", "cloud_context", type=click.STRING, default=None, help="BentoCloud context name.")
+        @cog.optgroup.option("-q", "--quiet", envvar=QUIET_ENV_VAR, is_flag=True, default=False, help="Suppress all output.", show_envvar=True)
+        @cog.optgroup.option( "--debug", "--verbose", "debug", envvar=DEBUG_ENV_VAR, is_flag=True, default=False, help="Print out debug logs.", show_envvar=True)
+        @cog.optgroup.option("--do-not-track", is_flag=True, default=False, envvar=analytics.OPENLLM_DO_NOT_TRACK, help="Do not send usage info", show_envvar=True)
+        @cog.optgroup.option( "--context", "cloud_context", envvar="BENTOCLOUD_CONTEXT", type=click.STRING, default=None, help="BentoCloud context name.", show_envvar=True)
         @click.pass_context
         @functools.wraps(f)
         def wrapper(ctx: click.Context, quiet: bool, debug: bool, cloud_context: str | None, *args: P.args, **attrs: P.kwargs) -> t.Any:
@@ -380,7 +352,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
         if "context_settings" not in attrs: attrs["context_settings"] = {}
         if "max_content_width" not in attrs["context_settings"]: attrs["context_settings"]["max_content_width"] = 120
         aliases = attrs.pop("aliases", None)
-        def wrapper(f: _AnyCallable) -> click.Command:
+        def decorator(f: _AnyCallable) -> click.Command:
             name = f.__name__.lower()
             if name.endswith("_command"): name = name[:-8]
             name = name.replace("_", "-")
@@ -404,7 +376,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
                 self._commands[cmd.name] = aliases
                 self._aliases.update({alias: cmd.name for alias in aliases})
             return cmd
-        return wrapper
+        return decorator
 
 @click.group(cls=OpenLLMCommandGroup, context_settings=_CONTEXT_SETTINGS, name="openllm")
 @click.version_option(None, "--version", "-v")
@@ -481,41 +453,25 @@ def start_decorator(llm_config: openllm.LLMConfig, serve_grpc: bool = False) -> 
     opts = [
         llm_config.to_click_options,
         _http_server_args if not serve_grpc else _grpc_server_args,
-        cog.optgroup.group("General LLM Options", help="The following options are related to running the LLM Server."),
-        model_id_option(cog.optgroup, model_env=llm_config["env"]),
-        model_version_option(cog.optgroup),
+        cog.optgroup.group("General LLM Options", help=f"The following options are related to running '{llm_config['start_name']}' LLM Server."),
+        model_id_option(factory=cog.optgroup, model_env=llm_config["env"]),
+        model_version_option(factory=cog.optgroup),
         cog.optgroup.option("--server-timeout", type=int, default=None, help="Server timeout in seconds"),
-        workers_per_resource_option(cog.optgroup),
-        cog.optgroup.option("--fast", is_flag=True, default=False, help="Bypass auto model checks and setup. This option is ahead-of-serving time.", envvar="OPENLLM_FAST"),
+        workers_per_resource_option(factory=cog.optgroup),
+        cog.optgroup.option("--fast", is_flag=True, default=False, help="Bypass auto model checks and download. This option is ahead-of-serving time.", envvar="OPENLLM_FAST"),
         cog.optgroup.group(
             "LLM Optimization Options",
             help="""\
-    These options are related for dynamic optimization on the fly. Current supported strategies:
-
-    - int8: Quantize the model with 8bit (bitsandbytes required)
-
-    - int4: Quantize the model with 4bit (bitsandbytes required)
-
-    - bettertransformer: Convert given model to FastTransformer
-
-    - GPTQ: [paper](https://arxiv.org/abs/2210.17323)
-
-    It also include serialisation format strategies for faster loading and importing time
-
-    - safetensors: Using safetensors instead of pickling (safetensors required) [default]
-
-    - legacy: using default torch load behaviour.
-
-    The following are currently being worked on:
+    The following are either in our roadmap or currently being worked on:
 
     - DeepSpeed Inference: [link](https://www.deepspeed.ai/inference/)
       """,
         ),
         cog.optgroup.option("--device", type=dantic.CUDA, multiple=True, envvar="CUDA_VISIBLE_DEVICES", callback=parse_device_callback, help=f"Assign GPU devices (if available) for {llm_config['model_name']}.", show_envvar=True),
         cog.optgroup.option("--runtime", type=click.Choice(["ggml", "transformers"]), default="transformers", help="The runtime to use for the given model. Default is transformers."),
-        quantize_option(cog.optgroup, model_env=llm_config["env"]),
-        bettertransformer_option(cog.optgroup, model_env=llm_config["env"]),
-        serialisation_option(cog.optgroup),
+        quantize_option(factory=cog.optgroup, model_env=llm_config["env"]),
+        bettertransformer_option(factory=cog.optgroup, model_env=llm_config["env"]),
+        serialisation_option(factory=cog.optgroup),
         cog.optgroup.group(
             "Fine-tuning related options",
             help="""\
@@ -637,7 +593,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
         # NOTE: currently, theres no development args in bentoml.Server. To be fixed upstream.
         development = server_attrs.pop("development")
         server_attrs.setdefault("production", not development)
-        wpr: t.Any = first_not_none(workers_per_resource, default=config["workers_per_resource"])
+        wpr = first_not_none(workers_per_resource, default=config["workers_per_resource"])
 
         if isinstance(wpr, str):
             if wpr == "round_robin": wpr = 1.0
@@ -649,6 +605,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
                     available_gpu = len(device) if device else device_count()
                     wpr = 1.0 if available_gpu == 0 else float(1 / available_gpu)
             else: wpr = float(wpr)
+        elif isinstance(wpr, int): wpr = float(wpr)
 
         # Create a new model env to work with the envvar during CLI invocation
         env = EnvVarMixin(config["model_name"], config.default_implementation(), model_id=model_id, bettertransformer=bettertransformer, quantize=quantize, runtime=runtime)
@@ -657,7 +614,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
         # NOTE: This is to set current configuration
         start_env = os.environ.copy()
         start_env = parse_config_options(config, server_timeout, wpr, device, start_env)
-        if fast and not get_quiet_mode(): _echo(f"Fast mode is enabled. Make sure the model is available in local store before 'start': 'openllm import {model}{'--model-id ' + model_id if model_id else ''}'", fg="yellow")
+        if fast: _echo(f"Fast mode is enabled. Make sure the model is available in local store before 'start': 'openllm import {model}{' --model-id ' + model_id if model_id else ''}'", fg="yellow")
 
         start_env.update(
             {
@@ -697,7 +654,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
         def next_step(model_name: str, adapter_map: DictStrAny | None) -> None:
             cmd_name = f"openllm build {model_name}"
             if adapter_map is not None: cmd_name += " " + " ".join([f"--adapter-id {s}" for s in [f"{p}:{name}" if name not in (None, "default") else p for p, name in adapter_map.items()]])
-            _echo(f"\n🚀 Next step: run '{cmd_name}' to create a Bento for {model_name}", fg="blue")
+            if not get_quiet_mode(): _echo(f"\n🚀 Next step: run '{cmd_name}' to create a Bento for {model_name}", fg="blue")
 
         if return_process:
             server.start(env=start_env, text=True)
@@ -728,42 +685,33 @@ def noop_command(llm_config: openllm.LLMConfig, _serve_grpc: bool, **command_att
     return noop
 
 def prerequisite_check(ctx: click.Context, llm_config: openllm.LLMConfig, quantize: t.LiteralString | None, adapter_map: dict[str, str | None] | None, num_workers: int) -> None:
+    if adapter_map and not is_peft_available(): ctx.fail("Using adapter requires 'peft' to be available. Make sure to install with 'pip install \"openllm[fine-tune]\"'")
     if quantize:
-        if device_count() < 1:
-            _echo("Quantization requires at least 1 GPU (got None)", fg="red")
-            ctx.exit(1)
-        if llm_config.default_implementation() == "vllm":
-            _echo("Quantization is not yet supported with vLLM", fg="red")
-            ctx.exit(1)
-
-    if adapter_map and not is_peft_available():
-        _echo("Using adapter requires 'peft' to be available. Make sure to install with 'pip install \"openllm[fine-tune]\"'", fg="red")
-        ctx.exit(1)
-
+        if device_count() < 1: ctx.fail("Quantization requires at least 1 GPU (got None)")
+        if llm_config.default_implementation() == "vllm": ctx.fail("Quantization is not yet supported with vLLM")
     requirements = llm_config["requirements"]
     if requirements is not None and len(requirements) > 0:
         missing_requirements = [i for i in requirements if importlib.util.find_spec(inflection.underscore(i)) is None]
         if len(missing_requirements) > 0: _echo(f"Make sure to have the following dependencies available: {missing_requirements}", fg="yellow")
-
     if num_workers > 1 and device_count() < num_workers: raise click.BadOptionUsage("workers_per_resource", f"# of workers is infered to {num_workers} GPUs per runner worker, while there are only '{device_count()}' for inference. (Tip: Try again using '--workers-per-resource={1/device_count()}')", ctx=ctx)
 
 @cli.command(name="import", aliases=["download"])
 @click.argument("model", type=click.Choice([inflection.dasherize(name) for name in openllm.CONFIG_MAPPING.keys()]))
 @click.argument("model_id", type=click.STRING, default=None, metavar="Optional[REMOTE_REPO/MODEL_ID | /path/to/local/model]", required=False)
 @click.argument("converter", envvar="CONVERTER", type=click.STRING, default=None, required=False, metavar=None)
-@model_version_option(click)
+@model_version_option
 @click.option("--runtime", type=click.Choice(["ggml", "transformers"]), default="transformers", help="The runtime to use for the given model. Default is transformers.")
 @output_option
-@quantize_option(click)
-@machine_option(click)
+@quantize_option
+@machine_option
 @click.option("--implementation", type=click.Choice(["pt", "tf", "flax", "vllm"]), default=None, help="The implementation for saving this LLM.")
-@serialisation_option(click)
+@serialisation_option
 def import_command(
     model: str,
     model_id: str | None,
     converter: str | None,
     model_version: str | None,
-    output: OutputLiteral,
+    output: LiteralOutput,
     runtime: t.Literal["ggml", "transformers"],
     machine: bool,
     implementation: LiteralRuntime | None,
@@ -842,8 +790,7 @@ def import_command(
         _previously_saved = True
     except bentoml.exceptions.NotFound:
         if not machine and output == "pretty":
-            msg = f"'{model}' does not exists in local store. Saving..."
-            if model_id is not None: msg = f"'{model}' with 'model_id={model_id}' does not exists in local store. Saving..."
+            msg = f"'{model}' {'with model_id='+ model_id if model_id is not None else ''} does not exists in local store. Saving to BENTOML_HOME{' (' + os.getenv('BENTOML_HOME', BentoMLContainer.bentoml_home.get()) + ')' if get_debug_mode() else ''}..."
             _echo(msg, fg="yellow", nl=True)
         _ref = openllm.serialisation.get(llm, auto_import=True)
         if impl == "pt" and is_torch_available() and torch.cuda.is_available(): torch.cuda.empty_cache()
@@ -1156,48 +1103,34 @@ start, start_grpc, build, import_model, list_models = codegen.gen_sdk(_start, _s
 
 @cli.command(context_settings={"token_normalize_func": inflection.underscore})
 @click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in openllm.CONFIG_MAPPING.keys()]))
-@model_id_option(click)
+@model_id_option
 @output_option
-@machine_option(click)
+@machine_option
 @click.option("--overwrite", is_flag=True, help="Overwrite existing Bento for given LLM if it already exists.")
-@workers_per_resource_option(click, build=True)
+@workers_per_resource_option(factory=click, build=True)
 @cog.optgroup.group(cls=cog.MutuallyExclusiveOptionGroup, name="Optimisation options")
-@quantize_option(cog.optgroup, build=True)
-@bettertransformer_option(cog.optgroup)
-@click.option(
-    "--runtime",
-    type=click.Choice(["ggml", "transformers"]),
-    default="transformers",
-    help="The runtime to use for the given model. Default is transformers.",
-)
-@click.option(
-    "--enable-features",
-    help="Enable additional features for building this LLM Bento. Available: {}".format(", ".join(openllm.utils.OPTIONAL_DEPENDENCIES)),
-    multiple=True,
-    nargs=1,
-    metavar="FEATURE[,FEATURE]",
-)
-@click.option(
-    "--adapter-id",
-    default=None,
-    help="Optional adapters id to be included within the Bento. Note that if you are using relative path, '--build-ctx' must be passed.",
-    multiple=True,
-    metavar="[PATH | [remote/][adapter_name:]adapter_id][, ...]",
-)
-@click.option("--build-ctx", help="Build context. This is required if --adapter-id uses relative path", default=".")
-@model_version_option(click)
+@quantize_option(factory=cog.optgroup, build=True)
+@bettertransformer_option(factory=cog.optgroup)
+@click.option("--runtime", type=click.Choice(["ggml", "transformers"]), default="transformers", help="The runtime to use for the given model. Default is transformers.")
+@click.option("--enable-features", multiple=True, nargs=1, metavar="FEATURE[,FEATURE]",
+    help="Enable additional features for building this LLM Bento. Available: {}".format(", ".join(openllm.utils.OPTIONAL_DEPENDENCIES)))
+@click.option("--adapter-id", default=None, multiple=True, metavar="[PATH | [remote/][adapter_name:]adapter_id][, ...]",
+    help="Optional adapters id to be included within the Bento. Note that if you are using relative path, '--build-ctx' must be passed.")
+@click.option("--build-ctx", help="Build context. This is required if --adapter-id uses relative path", default=None)
+@model_version_option
 @click.option("--dockerfile-template", default=None, type=click.File(), help="Optional custom dockerfile template to be used with this BentoLLM.")
-@serialisation_option(click)
+@serialisation_option
 @cog.optgroup.group(cls=cog.MutuallyExclusiveOptionGroup, name="Utilities options")
 @cog.optgroup.option("--containerize", default=False, is_flag=True, type=click.BOOL, help="Whether to containerize the Bento after building. '--containerize' is the shortcut of 'openllm build && bentoml containerize'.")
 @cog.optgroup.option("--push", default=False, is_flag=True, type=click.BOOL, help="Whether to push the result bento to BentoCloud. Make sure to login with 'bentoml cloud login' first.")
+@click.option("--fast/--no-fast", show_default=True, default=True, envvar="OPENLLM_USE_LOCAL_LATEST", show_envvar=True, help="Whether to skip checking if models is already in store. This is useful if you are just build the Bento directly")
 @click.pass_context
 def build_command(
     ctx: click.Context,
     model_name: str,
     model_id: str | None,
     overwrite: bool,
-    output: OutputLiteral,
+    output: LiteralOutput,
     runtime: t.Literal["ggml", "transformers"],
     quantize: t.Literal["int8", "int4", "gptq"] | None,
     enable_features: tuple[str, ...] | None,
@@ -1211,6 +1144,7 @@ def build_command(
     containerize: bool,
     push: bool,
     serialisation_format: t.Literal["safetensors", "legacy"],
+    fast: bool,
     **attrs: t.Any,
 ) -> bentoml.Bento:
     """Package a given models into a Bento.
@@ -1246,7 +1180,7 @@ def build_command(
             quantize=env.quantize_value,
             bettertransformer=env.bettertransformer_value,
             return_runner_kwargs=False,
-            ensure_available=True,
+            ensure_available=not fast,
             model_version=model_version,
             runtime=env.runtime_value,
             serialisation=serialisation_format,
@@ -1266,9 +1200,7 @@ def build_command(
 
             adapter_map: dict[str, str | None] | None = None
             if adapter_id:
-                if not build_ctx:
-                    _echo("'build_ctx' is required when '--adapter-id' is passsed.", fg="red")
-                    ctx.exit(1)
+                if not build_ctx: ctx.fail("'build_ctx' is required when '--adapter-id' is passsed.")
                 adapter_map = {}
                 for v in adapter_id:
                     _adapter_id, *adapter_name = v.rsplit(":", maxsplit=1)
@@ -1292,19 +1224,7 @@ def build_command(
                 if overwrite:
                     if output == "pretty": _echo(f"Overwriting existing Bento {bento_tag}", fg="yellow")
                     bentoml.delete(bento_tag)
-                    bento = openllm.bundle.create_bento(
-                        bento_tag,
-                        llm_fs,
-                        llm,
-                        workers_per_resource=workers_per_resource,
-                        adapter_map=adapter_map,
-                        quantize=quantize,
-                        bettertransformer=bettertransformer,
-                        extra_dependencies=enable_features,
-                        build_ctx=build_ctx,
-                        dockerfile_template=dockerfile_template_path,
-                        runtime=runtime,
-                    )
+                    raise bentoml.exceptions.NotFound(f"Rebuilding existing Bento {bento_tag}")
                 _previously_built = True
             except bentoml.exceptions.NotFound:
                 bento = openllm.bundle.create_bento(
@@ -1320,11 +1240,11 @@ def build_command(
                     dockerfile_template=dockerfile_template_path,
                     runtime=runtime,
                 )
-    except Exception: raise
+    except Exception as err: raise err from None
 
     if machine: _echo(f"__tag__:{bento.tag}", fg="white")
     elif output == "pretty":
-        if not get_quiet_mode():
+        if not get_quiet_mode() and (not push or not containerize):
             _echo("\n" + OPENLLM_FIGLET, fg="white")
             if not _previously_built: _echo(f"Successfully built {bento}.", fg="green")
             elif not overwrite: _echo(f"'{model_name}' already has a Bento built [{bento}]. To overwrite it pass '--overwrite'.", fg="yellow")
@@ -1353,15 +1273,15 @@ def build_command(
 
 
 @overload
-def models_command(ctx: click.Context, output: OutputLiteral, show_available: bool, machine: t.Literal[True] = True) -> DictStrAny: ...
+def models_command(ctx: click.Context, output: LiteralOutput, show_available: bool, machine: t.Literal[True] = True) -> DictStrAny: ...
 @overload
-def models_command(ctx: click.Context, output: OutputLiteral, show_available: bool, machine: t.Literal[False] = ...) -> None: ...
+def models_command(ctx: click.Context, output: LiteralOutput, show_available: bool, machine: t.Literal[False] = ...) -> None: ...
 @cli.command()
 @output_option
 @click.option("--show-available", is_flag=True, default=False, help="Show available models in local store (mutually exclusive with '-o porcelain').")
-@machine_option(click)
+@machine_option
 @click.pass_context
-def models_command(ctx: click.Context, output: OutputLiteral, show_available: bool, machine: bool) -> DictStrAny | None:
+def models_command(ctx: click.Context, output: LiteralOutput, show_available: bool, machine: bool) -> DictStrAny | None:
     """List all supported models.
 
     \b
@@ -1545,7 +1465,7 @@ def shared_client_options(f: _AnyCallable | None = None, output_value: t.Literal
 @click.option("--agent", type=click.Choice(["hf"]), default="hf", help="Whether to interact with Agents from given Server endpoint.", show_default=True)
 @click.option("--remote", is_flag=True, default=False, help="Whether or not to use remote tools (inference endpoints) instead of local ones.", show_default=True)
 @click.option("--opt", help="Define prompt options. " "(format: ``--opt text='I love this' --opt audio:./path/to/audio  --opt image:/path/to/file``)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
-def instruct(endpoint: str, timeout: int, agent: t.LiteralString, output: OutputLiteral, remote: bool, task: str, _memoized: DictStrAny, **attrs: t.Any) -> str:
+def instruct(endpoint: str, timeout: int, agent: t.LiteralString, output: LiteralOutput, remote: bool, task: str, _memoized: DictStrAny, **attrs: t.Any) -> str:
     """Instruct agents interactively for given tasks, from a terminal.
 
     \b
@@ -1571,16 +1491,16 @@ def instruct(endpoint: str, timeout: int, agent: t.LiteralString, output: Output
     else: raise click.BadOptionUsage("agent", f"Unknown agent type {agent}")
 
 @overload
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: OutputLiteral, machine: t.Literal[True] = True) -> openllm.EmbeddingsOutput: ...
+def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[True] = True) -> openllm.EmbeddingsOutput: ...
 @overload
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: OutputLiteral, machine: t.Literal[False] = False) -> None: ...
+def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[False] = False) -> None: ...
 @cli.command()
 @shared_client_options(output_value="json")
 @click.option("--server-type", type=click.Choice(["grpc", "http"]), help="Server type", default="http", show_default=True)
 @click.argument("text", type=click.STRING, nargs=-1)
-@machine_option(click)
+@machine_option
 @click.pass_context
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: OutputLiteral, machine: bool) -> openllm.EmbeddingsOutput | None:
+def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, machine: bool) -> openllm.EmbeddingsOutput | None:
     """Get embeddings interactively, from a terminal.
 
     \b
@@ -1609,7 +1529,7 @@ def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int
 @click.argument("prompt", type=click.STRING)
 @click.option("--sampling-params", help="Define query options. (format: ``--opt temperature=0.8 --opt=top_k:12)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
 @click.pass_context
-def query(ctx: click.Context, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: OutputLiteral, _memoized: DictStrAny, **attrs: t.Any) -> None:
+def query(ctx: click.Context, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, _memoized: DictStrAny, **attrs: t.Any) -> None:
     """Ask a LLM interactively, from a terminal.
 
     \b
@@ -1653,7 +1573,7 @@ def dive_bentos(ctx: click.Context, bento: str, machine: t.Literal[True] = True,
 def dive_bentos(ctx: click.Context, bento: str, machine: t.Literal[False] = False, _bento_store: BentoStore = ...) -> None: ...
 @utils_command.command()
 @click.argument("bento", type=str)
-@machine_option(click)
+@machine_option
 @click.pass_context
 @inject
 def dive_bentos(ctx: click.Context, bento: str, machine: bool, _bento_store: BentoStore = Provide[BentoMLContainer.bento_store]) -> str | None:
@@ -1668,16 +1588,16 @@ def dive_bentos(ctx: click.Context, bento: str, machine: bool, _bento_store: Ben
     ctx.exit(0)
 
 @overload
-def get_prompt(model_name: str, prompt: str, format: str | None, output: OutputLiteral, machine: t.Literal[True] = True) -> str: ...
+def get_prompt(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: t.Literal[True] = True) -> str: ...
 @overload
-def get_prompt(model_name: str, prompt: str, format: str | None, output: OutputLiteral, machine: t.Literal[False] = ...) -> None: ...
+def get_prompt(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: t.Literal[False] = ...) -> None: ...
 @utils_command.command()
 @click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in openllm.CONFIG_MAPPING.keys()]))
 @click.argument("prompt", type=click.STRING)
 @output_option
 @click.option("--format", type=click.STRING, default=None)
-@machine_option(click)
-def get_prompt(model_name: str, prompt: str, format: str | None, output: OutputLiteral, machine: bool) -> str | None:
+@machine_option
+def get_prompt(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: bool) -> str | None:
     """Get the default prompt used by OpenLLM."""
     module = openllm.utils.EnvVarMixin(model_name).module
     try:

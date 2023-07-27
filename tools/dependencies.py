@@ -173,7 +173,7 @@ _BASE_DEPENDENCIES = [
     Dependencies(name="httpx"),
     Dependencies(name="click", lower_constraint="8.1.6"),
     Dependencies(name="typing_extensions"),
-    Dependencies(name="docker"),
+    Dependencies(name="GitPython"),
     Dependencies(name="cuda-python", platform=("Darwin", "ne")),
     Dependencies(name="bitsandbytes", upper_constraint="0.42"),  # 0.41  works with CUDA 11.8
 ]
@@ -200,7 +200,7 @@ GGML_DEPS = ["ctransformers"]
 GPTQ_DEPS = ["auto-gptq[triton]"]
 VLLM_DEPS = ["vllm", "ray"]
 
-_base_requirements = {
+_base_requirements: dict[str, t.Any]= {
     inflection.dasherize(name): config_cls.__openllm_requirements__
     for name, config_cls in openllm.CONFIG_MAPPING.items()
     if config_cls.__openllm_requirements__

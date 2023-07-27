@@ -17,6 +17,7 @@
 These utilities will stay internal, and its API can be changed or updated without backward-compatibility.
 """
 from __future__ import annotations
+import sys
 import types
 import typing as t
 
@@ -49,13 +50,4 @@ if t.TYPE_CHECKING:
     from ._package import construct_python_options as construct_python_options
     from ._package import create_bento as create_bento
     from .oci import compose_containerfile as compose_containerfile
-else:
-    import sys
-
-    sys.modules[__name__] = LazyModule(
-        __name__,
-        globals()["__file__"],
-        _import_structure,
-        module_spec=__spec__,
-        extra_objects=_extras,
-    )
+else: sys.modules[__name__] = LazyModule(__name__, globals()["__file__"], _import_structure, module_spec=__spec__, extra_objects=_extras,)
