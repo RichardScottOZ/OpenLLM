@@ -394,8 +394,7 @@ def _wrapped_save_pretrained(f: _save_pretrained_wrapper[M, T]):
     def wrapper(self: LLM[M, T], save_directory: str | Path, **attrs: t.Any) -> None:
         if isinstance(save_directory, Path): save_directory = str(save_directory)
         if self.__llm_model__ is not None and self.bettertransformer and self.__llm_implementation__ == "pt":
-            from optimum.bettertransformer import BetterTransformer
-            self.__llm_model__ = t.cast(M, BetterTransformer.reverse(t.cast("transformers.PreTrainedModel", self.__llm_model__)))
+            self.__llm_model__ = t.cast("transformers.PreTrainedModel", self.__llm_model__).reverse_bettertransformer()
         f(self, save_directory, **attrs)
     return wrapper
 
@@ -901,8 +900,7 @@ class LLM(LLMInterface[M, T], ReprMixin):
 
         Note that the base model can still be accessed via self.model.get_base_model().
         """
-        assert self.__llm_model__ is not None  # noqa: S101
-
+        if self.__llm_model__ is None: raise ValueError("Error: Model is not loaded correctly")
         # early out if _adapters_mapping is empty or it is already wrapped with peft.
         if not self._adapters_mapping: return self.__llm_model__
         if isinstance(self.__llm_model__, peft.PeftModel): return self.__llm_model__
@@ -927,7 +925,7 @@ class LLM(LLMInterface[M, T], ReprMixin):
 
         return self.__llm_model__
     def _wrap_default_peft_model(self, adapter_mapping: dict[str, tuple[peft.PeftConfig, str]], inference_mode: bool):
-        assert self.__llm_model__ is not None, "Error: Model is not loaded correctly"  # noqa: S101
+        if self.__llm_model__ is None: raise ValueError("Error: Model is not loaded correctly")
         if isinstance(self.__llm_model__, peft.PeftModel): return self.__llm_model__
 
         if "default" not in adapter_mapping: raise ValueError("There is no 'default' mapping. Please check the adapter mapping and report this bug to the OpenLLM team.")
@@ -1092,18 +1090,16 @@ def llm_runnable_class(self: LLM[M, T], embeddings_sig: ModelSignature, generate
             # NOTE: The side effect of this line
             # is that it will load the imported model during
             # runner startup. So don't remove it!!
-            assert self.model  # noqa: S101
+            if not self.model: raise RuntimeError("Failed to load the model correctly (See traceback above)")
             if self.adapters_mapping is not None:
                 logger.info("Applying LoRA to %s...", self.runner_name)
                 self.apply_adapter(inference_mode=True, load_adapters="all")
-
         @requires_dependencies("peft", extra="fine-tune")
         def set_adapter(__self: _Runnable, adapter_name: str):
             if self.__llm_adapter_map__ is None: raise ValueError("No adapters available for current running server.")
             elif not isinstance(self.model, peft.PeftModel): raise RuntimeError("Model is not a PeftModel")
             if adapter_name != "default": self.model.set_adapter(adapter_name)
             logger.info("Successfully apply LoRA layer %s", adapter_name)
-
         @bentoml.Runnable.method(**method_signature(embeddings_sig))
         def embeddings(__self: _Runnable, prompt: str | list[str]) -> LLMEmbeddings: return self.embeddings([prompt] if isinstance(prompt, str) else prompt)
         @bentoml.Runnable.method(**method_signature(generate_sig))

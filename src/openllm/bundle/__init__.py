@@ -39,7 +39,7 @@ _extras: dict[str, t.Any] = {
 
 _import_structure: dict[str, list[str]] = {
     "_package": ["create_bento", "build_editable", "construct_python_options", "construct_docker_options"],
-    "oci": ["compose_containerfile"],
+    "oci": ["CONTAINER_NAMES", "get_base_container_tag", "build_container", "get_base_container_name"],
 }
 
 if t.TYPE_CHECKING:
@@ -49,5 +49,8 @@ if t.TYPE_CHECKING:
     from ._package import construct_docker_options as construct_docker_options
     from ._package import construct_python_options as construct_python_options
     from ._package import create_bento as create_bento
-    from .oci import compose_containerfile as compose_containerfile
+    from .oci import CONTAINER_NAMES as CONTAINER_NAMES
+    from .oci import build_container as build_container
+    from .oci import get_base_container_name as get_base_container_name
+    from .oci import get_base_container_tag as get_base_container_tag
 else: sys.modules[__name__] = LazyModule(__name__, globals()["__file__"], _import_structure, module_spec=__spec__, extra_objects=_extras,)

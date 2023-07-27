@@ -190,7 +190,7 @@ _NIGHTLY_MAPPING: dict[str, Dependencies] = {
 }
 
 _ALL_RUNTIME_DEPS = ["flax", "jax", "jaxlib", "tensorflow", "keras"]
-FINE_TUNE_DEPS = ["peft>=0.4.0", "bitsandbytes", "datasets", "accelerate", "deepspeed", "trl"]
+FINE_TUNE_DEPS = ["peft>=0.4.0", "bitsandbytes", "datasets", "accelerate", "trl"]
 FLAN_T5_DEPS = _ALL_RUNTIME_DEPS
 OPT_DEPS = _ALL_RUNTIME_DEPS
 OPENAI_DEPS = ["openai", "tiktoken"]
@@ -270,6 +270,14 @@ def create_url_table() -> Table:
     table.update({k: v for k, v in sorted(_urls.items())})
     return table
 
+def build_cli_extensions() -> Table:
+    table = tomlkit.table()
+    ext: dict[str, str] = {"openllm": "openllm.cli.entrypoint:cli"}
+    ext.update({f"openllm-{inflection.dasherize(ke)}": f"openllm.cli.ext.{ke}:cli" for ke in sorted([fname[:-3]
+                                                                                   for fname in os.listdir(os.path.abspath(os.path.join(ROOT, "src", "openllm", "cli", "ext")))
+                                                                                   if fname.endswith(".py") and not fname.startswith("__")])})
+    table.update(ext)
+    return table
 
 def main() -> int:
     with open(os.path.join(ROOT, "pyproject.toml"), "r") as f:
@@ -279,9 +287,9 @@ def main() -> int:
     dependencies_array.extend([v.to_str() for v in _BASE_DEPENDENCIES])
 
     pyproject["project"]["urls"] = create_url_table()
+    pyproject["project"]["scripts"] = build_cli_extensions()
     pyproject["project"]["classifiers"] = create_classifiers()
     pyproject["project"]["optional-dependencies"] = create_optional_table()
-    pyproject["project"]["scripts"] = {"openllm": "openllm.cli:cli"}
     pyproject["project"]["dependencies"] = dependencies_array.multiline(True)
 
     with open(os.path.join(ROOT, "pyproject.toml"), "w") as f:

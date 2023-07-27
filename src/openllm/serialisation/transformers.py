@@ -225,10 +225,8 @@ def load_model(llm: openllm.LLM[M, T], *decls: t.Any, **attrs: t.Any) -> M:
     if torch.cuda.is_available() and device_count() == 1 and not loaded_in_kbit:
         try: model = model.to("cuda")
         except torch.cuda.OutOfMemoryError as err: raise RuntimeError(f"Failed to convert {llm.config['model_name']} with model_id '{llm.model_id}' to CUDA.\nNote: You can try out '--quantize int8 | int4' for dynamic quantization.") from err
-    if llm.bettertransformer and llm.__llm_implementation__ == "pt" and not isinstance(model, _transformers.Pipeline):
-        # BetterTransformer is currently only supported on PyTorch.
-        from optimum.bettertransformer import BetterTransformer
-        model = BetterTransformer.transform(model)
+    # BetterTransformer is currently only supported on PyTorch.
+    if llm.bettertransformer and isinstance(model, _transformers.PreTrainedModel): model = model.to_bettertransformer()
     return t.cast("M", model)
 
 def save_pretrained(
