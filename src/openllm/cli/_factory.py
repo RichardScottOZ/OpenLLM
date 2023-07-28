@@ -243,15 +243,11 @@ def noop_command(group: click.Group, llm_config: LLMConfig, _serve_grpc: bool, *
 
 def prerequisite_check(ctx: click.Context, llm_config: LLMConfig, quantize: t.LiteralString | None, adapter_map: dict[str, str | None] | None, num_workers: int) -> None:
     if adapter_map and not is_peft_available(): ctx.fail("Using adapter requires 'peft' to be available. Make sure to install with 'pip install \"openllm[fine-tune]\"'")
-    if quantize:
-        if device_count() < 1: ctx.fail("Quantization requires at least 1 GPU (got None)")
-        if llm_config.default_implementation() == "vllm": ctx.fail("Quantization is not yet supported with vLLM")
+    if quantize and llm_config.default_implementation() == "vllm": ctx.fail(f"Quantization is not yet supported with vLLM. Set '{llm_config.env['framework']}=\"pt\"' to run with quantization.")
     requirements = llm_config["requirements"]
     if requirements is not None and len(requirements) > 0:
         missing_requirements = [i for i in requirements if importlib.util.find_spec(inflection.underscore(i)) is None]
         if len(missing_requirements) > 0: termui.echo(f"Make sure to have the following dependencies available: {missing_requirements}", fg="yellow")
-    if num_workers > 1 and device_count() < num_workers: raise click.BadOptionUsage("workers_per_resource", f"# of workers is infered to {num_workers} GPUs per runner worker, while there are only '{device_count()}' for inference. (Tip: Try again using '--workers-per-resource={1/device_count()}')", ctx=ctx)
-
 
 def start_decorator(llm_config: LLMConfig, serve_grpc: bool = False) -> t.Callable[[_AnyCallable], t.Callable[[FC], FC]]:
     opts = [
