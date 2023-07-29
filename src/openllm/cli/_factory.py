@@ -14,6 +14,7 @@ import bentoml
 from bentoml._internal.configuration.containers import BentoMLContainer
 
 from . import termui
+from .. import bundle
 from ..models.auto import CONFIG_MAPPING
 from ..models.auto import AutoConfig
 from ..utils import ENV_VARS_TRUE_VALUES
@@ -21,6 +22,7 @@ from ..utils import EnvVarMixin
 from ..utils import LazyType
 from ..utils import analytics
 from ..utils import available_devices
+from ..utils import compose
 from ..utils import dantic
 from ..utils import device_count
 from ..utils import first_not_none
@@ -51,6 +53,7 @@ def parse_config_options(
     device: tuple[str, ...] | None,
     environ: DictStrAny,
 ) -> DictStrAny:
+    # TODO: Support amd.com/gpu on k8s
     _bentoml_config_options_env = environ.pop("BENTOML_CONFIG_OPTIONS", "")
     _bentoml_config_options_opts = ["tracing.sample_rate=1.0", f"api_server.traffic.timeout={server_timeout}", f'runners."llm-{config["start_name"]}-runner".traffic.timeout={config["timeout"]}', f'runners."llm-{config["start_name"]}-runner".workers_per_resource={workers_per_resource}']
     if device:
@@ -249,8 +252,8 @@ def prerequisite_check(ctx: click.Context, llm_config: LLMConfig, quantize: t.Li
         missing_requirements = [i for i in requirements if importlib.util.find_spec(inflection.underscore(i)) is None]
         if len(missing_requirements) > 0: termui.echo(f"Make sure to have the following dependencies available: {missing_requirements}", fg="yellow")
 
-def start_decorator(llm_config: LLMConfig, serve_grpc: bool = False) -> t.Callable[[_AnyCallable], t.Callable[[FC], FC]]:
-    opts = [
+def start_decorator(llm_config: LLMConfig, serve_grpc: bool = False) -> t.Callable[[FC], t.Callable[[FC], FC]]:
+    return lambda fn: compose(*[
         llm_config.to_click_options,
         _http_server_args if not serve_grpc else _grpc_server_args,
         cog.optgroup.group("General LLM Options", help=f"The following options are related to running '{llm_config['start_name']}' LLM Server."),
@@ -258,14 +261,19 @@ def start_decorator(llm_config: LLMConfig, serve_grpc: bool = False) -> t.Callab
         model_version_option(factory=cog.optgroup),
         cog.optgroup.option("--server-timeout", type=int, default=None, help="Server timeout in seconds"),
         workers_per_resource_option(factory=cog.optgroup),
-        cog.optgroup.option("--fast", is_flag=True, default=False, help="Bypass auto model checks and download. This option is ahead-of-serving time.", envvar="OPENLLM_FAST"),
+        fast_option(factory=cog.optgroup),
         cog.optgroup.group(
             "LLM Optimization Options",
-            help="""\
-    The following are either in our roadmap or currently being worked on:
+            help="""Optimization related options.
 
-    - DeepSpeed Inference: [link](https://www.deepspeed.ai/inference/)
-      """,
+            OpenLLM supports running model with [BetterTransformer](https://pytorch.org/blog/a-better-transformer-for-fast-transformer-encoder-inference/),
+            k-bit quantization (8-bit, 4-bit), GPTQ quantization, PagedAttention via vLLM.
+
+            The following are either in our roadmap or currently being worked on:
+
+            - DeepSpeed Inference: [link](https://www.deepspeed.ai/inference/)
+            - GGML: Fast inference on [bare metal](https://github.com/ggerganov/ggml)
+            """,
         ),
         cog.optgroup.option("--device", type=dantic.CUDA, multiple=True, envvar="CUDA_VISIBLE_DEVICES", callback=parse_device_callback, help=f"Assign GPU devices (if available) for {llm_config['model_name']}.", show_envvar=True),
         cog.optgroup.option("--runtime", type=click.Choice(["ggml", "transformers"]), default="transformers", help="The runtime to use for the given model. Default is transformers."),
@@ -292,12 +300,15 @@ def start_decorator(llm_config: LLMConfig, serve_grpc: bool = False) -> t.Callab
         ),
         cog.optgroup.option("--adapter-id", default=None, help="Optional name or path for given LoRA adapter" + f" to wrap '{llm_config['model_name']}'", multiple=True, callback=_id_callback, metavar="[PATH | [remote/][adapter_name:]adapter_id][, ...]"),
         click.option("--return-process", is_flag=True, default=False, help="Internal use only.", hidden=True),
-    ]
-    def decorator(f: _AnyCallable) -> _AnyCallable:
-        for opt in reversed(opts): f = opt(f)
-        return f
-    return decorator
+    ])(fn)
 
+def parse_device_callback(ctx: click.Context, param: click.Parameter, value: tuple[tuple[str], ...] | None) -> TupleStr | None:
+    if value is None: return value
+    if not LazyType(TupleStr).isinstance(value): ctx.fail(f"{param} only accept multiple values, not {type(value)} (value: {value})")
+    el: TupleStr = tuple(i for k in value for i in k)
+    # NOTE: --device all is a special case
+    if len(el) == 1 and el[0] == "all": return tuple(map(str, available_devices()))
+    return el
 
 # NOTE: A list of bentoml option that is not needed for parsing.
 # NOTE: User shouldn't set '--working-dir', as OpenLLM will setup this.
@@ -334,113 +345,115 @@ def parse_serve_args(serve_grpc: bool) -> t.Callable[[t.Callable[..., LLMConfig]
 
 _http_server_args, _grpc_server_args = parse_serve_args(False), parse_serve_args(True)
 
-def cli_option(*param_decls: t.Any, **attrs: t.Any) -> t.Callable[[FC], FC]:
+def cli_option(*param_decls: t.Any, **attrs: t.Any) -> t.Callable[[FC | None], FC]:
     """General ``@click.option`` with some sauce.
 
     This decorator extends the default ``@click.option`` plus a factory option to use which type of option, for example: [click, click_option_group.optgroup]
     """
     attrs.setdefault("help", "General option for OpenLLM CLI.")
     factory = attrs.pop("factory", click)
-    def decorator(f: FC) -> FC: return factory.option(*param_decls, **attrs)(f)
+    def decorator(f: FC | None) -> FC: return t.cast(FC, factory.option(*param_decls, **attrs)(f) if f is not None else factory.option(*param_decls, **attrs))
     return decorator
-
-def parse_device_callback(ctx: click.Context, param: click.Parameter, value: tuple[tuple[str], ...] | None) -> TupleStr | None:
-    if value is None: return value
-    if not LazyType(TupleStr).isinstance(value): ctx.fail(f"{param} only accept multiple values, not {type(value)} (value: {value})")
-    el: TupleStr = tuple(i for k in value for i in k)
-    # NOTE: --device all is a special case
-    if len(el) == 1 and el[0] == "all": return tuple(map(str, available_devices()))
-    return el
 
 def output_option(f: _AnyCallable | None = None, *, default_value: LiteralOutput = "pretty", **attrs: t.Any) -> t.Callable[[FC], FC]:
     output = ["json", "pretty", "porcelain"]
     def complete_output_var(ctx: click.Context, param: click.Parameter, incomplete: str) -> list[CompletionItem]: return [CompletionItem(it) for it in output]
-    opt = cli_option("-o", "--output", "output", type=click.Choice(output), default=default_value, help="Showing output type.", show_default=True,
-                    envvar="OPENLLM_OUTPUT", show_envvar=True, shell_complete=complete_output_var, **attrs)
-    return opt if f is None else opt(f)
+    return cli_option("-o", "--output", "output", type=click.Choice(output), default=default_value, help="Showing output type.", show_default=True,
+                    envvar="OPENLLM_OUTPUT", show_envvar=True, shell_complete=complete_output_var, **attrs)(f)
+def fast_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--fast/--no-fast", show_default=True, default=False, envvar="OPENLLM_USE_LOCAL_LATEST", show_envvar=True,
+                                                                                                          help="""Whether to skip checking if models is already in store.
 
-def machine_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    opt = cli_option("--machine", is_flag=True, default=False, hidden=True, **attrs)
-    return opt if f is None else opt(f)
+                                                                                                          This is useful if you already downloaded or setup the model beforehand.
+                                                                                                          """, **attrs)(f)
+def machine_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--machine", is_flag=True, default=False, hidden=True, **attrs)(f)
+def model_id_option(f: _AnyCallable | None = None, *, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--model-id", type=click.STRING, default=None, envvar=model_env.model_id if model_env is not None else None,
+                                                                                                                                                       show_envvar=model_env is not None,
+                                                                                                                                                       help="Optional model_id name or path for (fine-tune) weight.",  **attrs)(f)
+def model_version_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--model-version", type=click.STRING, default=None,
+                                                                                                                   help="Optional model version to save for this model. It will be inferred automatically from model-id.", **attrs)(f)
+def model_name_argument(f: _AnyCallable | None = None, required: bool = True): return (click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required)(f) if f is not None
+                                                                               else click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required))
+def quantize_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--quantise", "--quantize", "quantize", type=click.Choice(["int8", "int4", "gptq"]), default=None,
+                                                                                                                                                                            envvar=model_env.quantize if model_env is not None else None, show_envvar=model_env is not None,
+                                                                                                                                                                            help="""Dynamic quantization for running this LLM.
 
-def model_id_option(f: _AnyCallable | None = None, *, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    envvar = model_env.model_id if model_env is not None else None
-    opt = cli_option("--model-id", type=click.STRING, default=None, help="Optional model_id name or path for (fine-tune) weight.", envvar=envvar, show_envvar=True if envvar is not None else False, **attrs)
-    return opt if f is None else opt(f)
+                                                                                                                                                                            The following quantization strategies are supported:
 
-def model_version_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    opt = cli_option("--model-version", type=click.STRING, default=None, help="Optional model version to save for this model. It will be inferred automatically from model-id.", **attrs)
-    return opt if f is None else opt(f)
+                                                                                                                                                                            - ``int8``: ``LLM.int8`` for [8-bit](https://arxiv.org/abs/2208.07339) quantization.
 
-def model_name_argument(f: _AnyCallable | None = None, required: bool = True):
-    arg = click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required)
-    return arg if f is None else arg(f)
+                                                                                                                                                                            - ``int4``: ``SpQR`` for [4-bit](https://arxiv.org/abs/2306.03078) quantization.
+
+                                                                                                                                                                            - ``gptq``: ``GPTQ`` [quantization](https://arxiv.org/abs/2210.17323)
+
+                                                                                                                                                                            **Note** that the model can also be served with quantized weights.
+                                                                                                                                                                            """ + ("""
+                                                                                                                                                                            **Note** that this will set the mode for serving within deployment.""" if build else "") + """
+                                                                                                                                                                            **Note** that quantization are currently only available in *PyTorch* models.""", **attrs)(f)
+def workers_per_resource_option(f: _AnyCallable | None = None, *, build: bool = False, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--workers-per-resource", default=None, callback=workers_per_resource_callback, type=str, required=False,
+                                                                                                                                                  help="""Number of workers per resource assigned.
+
+                                                                                                                                                  See https://docs.bentoml.org/en/latest/guides/scheduling.html#resource-scheduling-strategy
+                                                                                                                                                  for more information. By default, this is set to 1.
+
+                                                                                                                                                  **Note**: ``--workers-per-resource`` will also accept the following strategies:
+
+                                                                                                                                                  - ``round_robin``: Similar behaviour when setting ``--workers-per-resource 1``. This is useful for smaller models.
+
+                                                                                                                                                  - ``conserved``: This will determine the number of available GPU resources, and only assign one worker for the LLMRunner. For example, if ther are 4 GPUs available, then ``conserved`` is equivalent to ``--workers-per-resource 0.25``.
+                                                                                                                                                  """ + ("""\n
+                                                                                                                                                  **Note**: The workers value passed into 'build' will determine how the LLM can
+                                                                                                                                                  be provisioned in Kubernetes as well as in standalone container. This will
+                                                                                                                                                  ensure it has the same effect with 'openllm start --workers ...'""" if build else ""), **attrs)(f)
+def bettertransformer_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--bettertransformer", is_flag=True, default=None, envvar=model_env.bettertransformer if model_env is not None else None, show_envvar=model_env is not None,
+                                                                                                                                                                                     help="Apply FasterTransformer wrapper to serve model. This will applies during serving time." if not build else "Set default environment variable whether to serve this model with FasterTransformer in build time.",
+                                                                                                                                                                                     **attrs)(f)
+def serialisation_option(f: _AnyCallable | None = None, **attrs: t.Any): return cli_option("--serialisation", "--serialization", "serialisation_format", type=click.Choice(["safetensors", "legacy"]),
+                                                                                           default="safetensors", show_default=True, show_envvar=True, envvar="OPENLLM_SERIALIZATION",
+                                                                                           help="""Serialisation format for save/load LLM.
+
+                                                                                           Currently the following strategies are supported:
+
+                                                                                           - ``safetensors``: This will use safetensors format, which is synonymous to
+
+                                                                                                    \b
+                                                                                                    ``safe_serialization=True``.
+
+                                                                                                    \b
+                                                                                                    **Note** that this format might not work for every cases, and
+                                                                                                    you can always fallback to ``legacy`` if needed.
+
+                                                                                           - ``legacy``: This will use PyTorch serialisation format, often as ``.bin`` files.
+                                                                                                         This should be used if the model doesn't yet support safetensors.
+
+                                                                                           **Note** that GGML format is working in progress.
+                                                                                           """, **attrs
+                                                                                        )(f)
+def container_registry_option(f: _AnyCallable | None = None, **attrs: t.Any): return cli_option("--container-registry", "container_registry", type=str, default="gh", show_default=True, show_envvar=True, envvar="OPENLLM_CONTAINER_REGISTRY",
+                                                                                                help="""The default container registry to get the base image for building BentoLLM.
+
+                                                                                                Currently, it supports 'quay.io', 'ghcr.io', 'docker.io'
+
+                                                                                                ``--container-registry`` will also support the following syntax: ``--container-registry gh:local``. This will use the local image for better debugging
+                                                                                                experience. Note that this means you must use ``openllm ext build-base-container`` to make sure the base image is available locally.
+
+                                                                                                **Note** that in order to build the image, you will need a GPUs to compile custom kernel. See ``openllm ext build-base-container`` for more information.
+                                                                                                """)(f)
 
 _wpr_strategies = {"round_robin", "conserved"}
-
 def workers_per_resource_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
     if value is None: return value
     value = inflection.underscore(value)
-    if value in {"round_robin", "conserved"}: return value
+    if value in _wpr_strategies: return value
     else:
         try: float(value)  # type: ignore[arg-type]
-        except ValueError: ctx.fail(f"'workers_per_resource' only accept '{_wpr_strategies}' as possible strategies, otherwise pass in float.")
+        except ValueError: raise click.BadParameter(f"'workers_per_resource' only accept '{_wpr_strategies}' as possible strategies, otherwise pass in float.", ctx, param) from None
         else: return value
 
-def workers_per_resource_option(f: _AnyCallable | None = None, *, build: bool = False, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    opt = cli_option("--workers-per-resource", default=None, callback=workers_per_resource_callback, type=str, required=False,
-                 help="""Number of workers per resource assigned.
-    See https://docs.bentoml.org/en/latest/guides/scheduling.html#resource-scheduling-strategy
-    for more information. By default, this is set to 1.
-
-    **Note**: ``--workers-per-resource`` will also accept the following strategies:
-
-    - ``round_robin``: Similar behaviour when setting ``--workers-per-resource 1``. This is useful for smaller models.
-
-    - ``conserved``: This will determine the number of available GPU resources, and only assign one worker for the LLMRunner. For example, if ther are 4 GPUs available, then ``conserved`` is equivalent to ``--workers-per-resource 0.25``.
-    """ + ("""\n
-    **Note**: The workers value passed into 'build' will determine how the LLM can
-    be provisioned in Kubernetes as well as in standalone container. This will
-    ensure it has the same effect with 'openllm start --workers ...'""" if build else ""), **attrs)
-    return opt if f is None else opt(f)
-
-def quantize_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    envvar = model_env.quantize if model_env is not None else None
-    opt = cli_option("--quantise", "--quantize", "quantize", type=click.Choice(["int8", "int4", "gptq"]), default=None, envvar=envvar, show_envvar=True if envvar is not None else False,
-                 help="""Dynamic quantization for running this LLM.
-
-    The following quantization strategies are supported:
-
-    - ``int8``: ``LLM.int8`` for [8-bit](https://arxiv.org/abs/2208.07339) quantization.
-
-    - ``int4``: ``SpQR`` for [4-bit](https://arxiv.org/abs/2306.03078) quantization.
-
-    - ``gptq``: ``GPTQ`` [quantization](https://arxiv.org/abs/2210.17323)
-
-    **Note** that the model can also be served with quantized weights.
-    """ + ("""
-    **Note** that this will set the mode for serving within deployment.""" if build else "") + """
-    **Note** that quantization are currently only available in *PyTorch* models.""", **attrs)
-    return opt if f is None else opt(f)
-
-def bettertransformer_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]:
-    envvar = model_env.bettertransformer if model_env is not None else None
-    opt = cli_option("--bettertransformer", is_flag=True, default=None, envvar=envvar, show_envvar=True if envvar is not None else False,
-        help="Apply FasterTransformer wrapper to serve model. This will applies during serving time." if not build else "Set default environment variable whether to serve this model with FasterTransformer in build time.", **attrs)
-    return opt if f is None else opt(f)
-
-def serialisation_option(f: _AnyCallable | None = None, **attrs: t.Any):
-    opt = cli_option("--serialisation", "--serialization", "serialisation_format", type=click.Choice(["safetensors", "legacy"]),
-        default="safetensors", show_default=True, show_envvar=True, envvar="OPENLLM_SERIALIZATION",
-        help="""Serialisation format for save/load LLM.
-
-        Currently the following strategies are supported:
-
-        - ``safetensors``: This will use safetensors format, which is synonymous to ``safe_serialization=True``.
-
-                           **Note** that this format might not work for every cases, and we are currently working on a conversion strategy to safetensors from arbitrary PyTorch weights.
-
-        - ``legacy``: This will use PyTorch serialisation format, often as ``.bin`` files. This should be used if the model doesn't yet support safetensors.
-        """, **attrs
-    )
-    return opt if f is None else opt(f)
+LOCAL_BUILD_KEY = "_local_container"
+def container_registry_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    if value is None: return value
+    reg, _, maybe_local = value.partition(":")
+    if reg not in bundle.supported_registries: raise click.BadParameter(f"Value must be one of {bundle.supported_registries}", ctx, param)
+    if maybe_local and maybe_local.strip() != "local": raise click.BadParameter("postfix must strictly be ':local' if using local built container.")
+    ctx.params[LOCAL_BUILD_KEY] = maybe_local != ""
+    return reg

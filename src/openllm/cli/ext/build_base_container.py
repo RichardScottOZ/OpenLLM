@@ -20,4 +20,4 @@ if t.TYPE_CHECKING:
                 """)
 @click.option("--registry", multiple=True, type=click.Choice(list(openllm.bundle.CONTAINER_NAMES)), help="Target registry to create image tag on.", default=None)
 @click.option("--push/--no-push", help="Whether to push to remote repository", is_flag=True, default=False)
-def cli(registry: tuple[LiteralContainerRegistry, ...], push: bool): openllm.bundle.build_container(registry, push)
+def cli(registry: tuple[LiteralContainerRegistry, ...] | None, push: bool) -> None: openllm.bundle.build_container(registry, push)

@@ -20,7 +20,7 @@ else:
     from typing_extensions import overload
 
 if t.TYPE_CHECKING:
-    from openllm.cli.entrypoint import LiteralOutput
+    from ..entrypoint import LiteralOutput
 
 @overload
 def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: t.Literal[True] = True) -> str: ...

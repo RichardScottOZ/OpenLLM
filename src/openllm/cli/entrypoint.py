@@ -70,9 +70,12 @@ from bentoml._internal.models.model import ModelStore
 
 from . import termui
 from ._factory import FC
+from ._factory import LOCAL_BUILD_KEY
 from ._factory import LiteralOutput
 from ._factory import _AnyCallable
 from ._factory import bettertransformer_option
+from ._factory import container_registry_option
+from ._factory import fast_option
 from ._factory import machine_option
 from ._factory import model_id_option
 from ._factory import model_name_argument
@@ -727,8 +730,8 @@ start, start_grpc, build, import_model, list_models = codegen.gen_sdk(_start, _s
 @model_version_option
 @click.option("--dockerfile-template", default=None, type=click.File(), help="Optional custom dockerfile template to be used with this BentoLLM.")
 @serialisation_option
-@click.option("--container-registry", default="gh", type=click.Choice(bundle.supported_registries))
-@click.option("--fast/--no-fast", show_default=True, default=True, envvar="OPENLLM_USE_LOCAL_LATEST", show_envvar=True, help="Whether to skip checking if models is already in store. This is useful if you are just build the Bento directly")
+@container_registry_option
+@fast_option
 @cog.optgroup.group(cls=cog.MutuallyExclusiveOptionGroup, name="Utilities options")
 @cog.optgroup.option("--containerize", default=False, is_flag=True, type=click.BOOL, help="Whether to containerize the Bento after building. '--containerize' is the shortcut of 'openllm build && bentoml containerize'.")
 @cog.optgroup.option("--push", default=False, is_flag=True, type=click.BOOL, help="Whether to push the result bento to BentoCloud. Make sure to login with 'bentoml cloud login' first.")
@@ -767,6 +770,8 @@ def build_command(
     > NOTE: To run a container built from this Bento with GPU support, make sure
     > to have https://github.com/NVIDIA/nvidia-container-toolkit install locally.
     """
+    local_container = attrs.pop(LOCAL_BUILD_KEY, False)
+    if local_container: termui.echo("Make sure that the image")
     if machine: output = "porcelain"
     if enable_features: enable_features = tuple(itertools.chain.from_iterable((s.split(",") for s in enable_features)))
 
@@ -1063,9 +1068,7 @@ def shared_client_options(f: _AnyCallable | None = None, output_value: t.Literal
         click.option("--timeout", type=click.INT, default=30, help="Default server timeout", show_default=True),
         output_option(default_value=output_value),
     ]
-    if f is None: return compose(*options)
-    for opt in reversed(options): f = opt(f)
-    return f
+    return compose(*options)(f) if f is not None else compose(*options)
 
 
 @cli.command()
@@ -1074,7 +1077,7 @@ def shared_client_options(f: _AnyCallable | None = None, output_value: t.Literal
 @click.option("--agent", type=click.Choice(["hf"]), default="hf", help="Whether to interact with Agents from given Server endpoint.", show_default=True)
 @click.option("--remote", is_flag=True, default=False, help="Whether or not to use remote tools (inference endpoints) instead of local ones.", show_default=True)
 @click.option("--opt", help="Define prompt options. " "(format: ``--opt text='I love this' --opt audio:./path/to/audio  --opt image:/path/to/file``)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
-def instruct(endpoint: str, timeout: int, agent: t.LiteralString, output: LiteralOutput, remote: bool, task: str, _memoized: DictStrAny, **attrs: t.Any) -> str:
+def instruct_command(endpoint: str, timeout: int, agent: t.LiteralString, output: LiteralOutput, remote: bool, task: str, _memoized: DictStrAny, **attrs: t.Any) -> str:
     """Instruct agents interactively for given tasks, from a terminal.
 
     \b
@@ -1100,16 +1103,16 @@ def instruct(endpoint: str, timeout: int, agent: t.LiteralString, output: Litera
     else: raise click.BadOptionUsage("agent", f"Unknown agent type {agent}")
 
 @overload
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[True] = True) -> EmbeddingsOutput: ...
+def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[True] = True) -> EmbeddingsOutput: ...
 @overload
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[False] = False) -> None: ...
+def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[False] = False) -> None: ...
 @cli.command()
 @shared_client_options(output_value="json")
 @click.option("--server-type", type=click.Choice(["grpc", "http"]), help="Server type", default="http", show_default=True)
 @click.argument("text", type=click.STRING, nargs=-1)
 @machine_option
 @click.pass_context
-def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, machine: bool) -> EmbeddingsOutput | None:
+def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, machine: bool) -> EmbeddingsOutput | None:
     """Get embeddings interactively, from a terminal.
 
     \b
@@ -1136,7 +1139,7 @@ def embed(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int
 @click.argument("prompt", type=click.STRING)
 @click.option("--sampling-params", help="Define query options. (format: ``--opt temperature=0.8 --opt=top_k:12)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
 @click.pass_context
-def query(ctx: click.Context, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, _memoized: DictStrAny, **attrs: t.Any) -> None:
+def query_command(ctx: click.Context, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, _memoized: DictStrAny, **attrs: t.Any) -> None:
     """Ask a LLM interactively, from a terminal.
 
     \b
@@ -1221,7 +1224,7 @@ class Extensions(click.MultiCommand):
     def list_commands(self, ctx: click.Context) -> list[str]: return sorted([filename[:-3] for filename in os.listdir(_EXT_FOLDER) if filename.endswith(".py") and not filename.startswith("__")])
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         try: mod = __import__(f"openllm.cli.ext.{cmd_name}", None, None, ["cli"])
-        except ImportError: return
+        except ImportError: return None
         return mod.cli
 
 @cli.group(cls=Extensions, name="ext", aliases=["utils"], help="Extension for OpenLLM CLI.")

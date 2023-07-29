@@ -19,7 +19,6 @@ import pathlib
 import shutil
 import subprocess
 import typing as t
-import uuid
 
 from git.exc import InvalidGitRepositoryError
 from git.repo import Repo
@@ -51,7 +50,7 @@ _R = t.TypeVar("_R")
 def validate_correct_module_path(f: t.Callable[P, _R]) -> t.Callable[P, _R]:
     @functools.wraps(f)
     def inner(*args: P.args, **kwargs: P.kwargs) -> _R:
-        if _module_location is None: raise RuntimeError("Failed to locate openllm installation.")
+        if _module_location is None: raise RuntimeError("Failed to locate openllm installation. You either have a broken installation or something went wrong. Make sure to report back to the OpenLLM team.")
         return f(*args, **kwargs)
     return inner
 
@@ -62,7 +61,7 @@ def get_base_container_name(local: bool) -> str:
     # this branch is already checked by decorator, hence it is here to make type checker happy
     def resolve_container_name() -> str:
         if t.TYPE_CHECKING: assert _module_location is not None
-        return f"pypi-openllm-{uuid.uuid4()}" if "site-packages" in _module_location else f"openllm-{uuid.uuid4()}"
+        return "pypi-openllm" if "site-packages" in _module_location else "openllm"
     if local: return resolve_container_name()
     try:
         repo = Repo(_module_location, search_parent_directories=True)
@@ -83,7 +82,7 @@ def get_base_container_tag() -> str:
     # from the root directory of openllm from this file
     except InvalidGitRepositoryError: return generate_hash_from_file(ROOT_DIR.resolve().__fspath__())
 
-def build_container(registries: t.Literal["local"] | LiteralContainerRegistry | t.Sequence[LiteralContainerRegistry] | None = None, push: bool = False) -> None:
+def build_container(registries: LiteralContainerRegistry | t.Sequence[LiteralContainerRegistry] | None = None, push: bool = False) -> None:
     try:
         if not _BUILDER.health(): raise Error
     except (Error, subprocess.CalledProcessError): raise RuntimeError("Building base container requires BuildKit (via Buildx) to be installed. See https://docs.docker.com/build/buildx/install/ for instalation instruction.") from None
@@ -92,9 +91,7 @@ def build_container(registries: t.Literal["local"] | LiteralContainerRegistry | 
     if not _module_location: raise RuntimeError("Failed to determine source location of 'openllm'. (Possible broken installation)")
     pyproject_path = pathlib.Path(_module_location).parent.parent / "pyproject.toml"
     if not pyproject_path.exists(): raise ValueError("This utility can only be run within OpenLLM git repository. Clone it first with 'git clone https://github.com/bentoml/OpenLLM.git'")
-    if registries == "local":
-        tags = (f"{get_base_container_name(True)}:{get_base_container_tag()}", )
-    elif registries is None: tags = tuple(f"{name}:{get_base_container_tag()}" for name in get_registry_mapping())  # Default loop through all registry item
+    if registries is None: tags = tuple(f"{name}:{get_base_container_tag()}" for name in get_registry_mapping())  # Default loop through all registry item
     else:
         if isinstance(registries, str): registries = [registries]
         else: registries = list(registries)

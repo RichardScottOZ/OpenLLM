@@ -31,13 +31,13 @@ from bentoml._internal.bento.build_config import BentoBuildConfig
 from bentoml._internal.bento.build_config import DockerOptions
 from bentoml._internal.bento.build_config import ModelSpec
 from bentoml._internal.bento.build_config import PythonOptions
-from bentoml._internal.configuration import get_debug_mode
 from bentoml._internal.configuration.containers import BentoMLContainer
 
 from ..utils import DEBUG
 from ..utils import EnvVarMixin
 from ..utils import codegen
 from ..utils import device_count
+from ..utils import get_debug_mode
 from ..utils import is_flax_available
 from ..utils import is_tf_available
 from ..utils import is_torch_available
@@ -156,7 +156,9 @@ def construct_docker_options(
         "OPENLLM_SERIALIZATION": serialisation_format,
         "OPENLLM_ADAPTER_MAP": f"'{orjson.dumps(adapter_map).decode()}'",
         "OPENLLM_FAST": str(True),
-        "BENTOML_DEBUG": str(get_debug_mode()),
+        "BENTOML_DEBUG": str(True),
+        "BENTOML_QUIET": str(False),
+        "OPENLLMDEVDEBUG": str(get_debug_mode()),
         "BENTOML_CONFIG_OPTIONS": f"'{_bentoml_config_options}'",
         env.model_id: f"/home/bentoml/bento/models/{llm.tag.path()}",  # This is the default BENTO_PATH var
     }
