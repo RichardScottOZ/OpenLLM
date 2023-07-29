@@ -1,5 +1,4 @@
 from __future__ import annotations
-import sys
 import typing as t
 
 import click
@@ -12,20 +11,9 @@ import openllm
 from .. import termui
 from ..._prompt import process_prompt
 
-# NOTE: We need to do this so that overload can register
-# correct overloads to typing registry
-if sys.version_info[:2] >= (3, 11):
-    from typing import overload
-else:
-    from typing_extensions import overload
-
 if t.TYPE_CHECKING:
     from ..entrypoint import LiteralOutput
 
-@overload
-def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: t.Literal[True] = True) -> str: ...
-@overload
-def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: t.Literal[False] = ...) -> None: ...
 @click.command("get_prompt", context_settings=termui.CONTEXT_SETTINGS)
 @click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in openllm.CONFIG_MAPPING.keys()]))
 @click.argument("prompt", type=click.STRING)
@@ -33,7 +21,8 @@ def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput,
 @click.option("--format", type=click.STRING, default=None)
 @click.option("--machine", is_flag=True, default=False, hidden=True)
 @click.option("--opt", help="Define additional prompt variables. (format: ``--opt system_prompt='You are a useful assistant'``)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
-def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: bool, _memoized: dict[str, t.Any], **_: t.Any) -> str | None:
+@click.pass_context
+def cli(ctx: click.Context, /, model_name: str, prompt: str, format: str | None, output: LiteralOutput, machine: bool, _memoized: dict[str, t.Any], **_: t.Any) -> str | None:
     """Get the default prompt used by OpenLLM."""
     module = openllm.utils.EnvVarMixin(model_name).module
     _memoized = {k: v[0] for k, v in _memoized.items() if v}
@@ -57,3 +46,4 @@ def cli(model_name: str, prompt: str, format: str | None, output: LiteralOutput,
             termui.echo(f"== Prompt for {model_name} ==\n", fg="magenta")
             termui.echo(fully_formatted, fg="white")
     except AttributeError: raise click.ClickException(f"Failed to determine a default prompt template for {model_name}.") from None
+    ctx.exit(0)

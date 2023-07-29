@@ -118,6 +118,7 @@ from ..utils import is_jupytext_available
 from ..utils import is_notebook_available
 from ..utils import is_torch_available
 from ..utils import is_transformers_supports_agent
+from ..utils import pkg
 from ..utils import resolve_user_filepath
 from ..utils import set_debug_mode
 from ..utils import set_quiet_mode
@@ -132,7 +133,6 @@ if t.TYPE_CHECKING:
 
     from .._configuration import LLMConfig
     from .._schema import EmbeddingsOutput
-    from .._types import ClickFunctionWrapper
     from .._types import DictStrAny
     from .._types import ListStr
     from .._types import LiteralRuntime
@@ -170,10 +170,14 @@ class GlobalOptions:
     cloud_context: str | None = attr.field(default=None, converter=attr.converters.default_if_none("default"))
     def with_options(self, **attrs: t.Any) -> t.Self: return attr.evolve(self, **attrs)
 
+CmdType = t.TypeVar("CmdType", bound=click.Command)
+
+_object_setattr = object.__setattr__
+
 class OpenLLMCommandGroup(BentoMLCommandGroup):
     NUMBER_OF_COMMON_PARAMS = 5  # parameters in common_params + 1 faked group option header
     @staticmethod
-    def common_params(f: FC) -> t.Callable[[FC], FC]:
+    def common_params(f: t.Callable[P, t.Any]) -> t.Callable[[FC], FC]:
         # The following logics is similar to one of BentoMLCommandGroup
         @cog.optgroup.group("Global options")
         @cog.optgroup.option("-q", "--quiet", envvar=QUIET_ENV_VAR, is_flag=True, default=False, help="Suppress all output.", show_envvar=True)
@@ -182,7 +186,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
         @cog.optgroup.option( "--context", "cloud_context", envvar="BENTOCLOUD_CONTEXT", type=click.STRING, default=None, help="BentoCloud context name.", show_envvar=True)
         @click.pass_context
         @functools.wraps(f)
-        def wrapper(ctx: click.Context, quiet: bool, debug: bool, cloud_context: str | None, *args: P.args, **attrs: P.kwargs) -> t.Any:
+        def wrapper(ctx: click.Context, quiet: bool, debug: bool, cloud_context: str | None, /, *args: P.args, **attrs: P.kwargs) -> t.Any:
             ctx.obj = GlobalOptions(cloud_context=cloud_context)
             if quiet:
                 set_quiet_mode(True)
@@ -192,10 +196,10 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
             return f(*args, **attrs)
         return wrapper
     @staticmethod
-    def usage_tracking(func: _AnyCallable, group: click.Group, **attrs: t.Any) -> _AnyCallable:
+    def usage_tracking(func: t.Callable[P, t.Any], group: click.Group, **attrs: t.Any) -> t.Callable[t.Concatenate[bool, P], t.Any]:
         command_name = attrs.get("name", func.__name__)
         @functools.wraps(func)
-        def wrapper(do_not_track: bool, *args: P.args, **attrs: P.kwargs) -> t.Any:
+        def wrapper(do_not_track: bool, /, *args: P.args, **attrs: P.kwargs) -> t.Any:
             if do_not_track:
                 with analytics.set_bentoml_tracking(): return func(*args, **attrs)
             start_time = time.time_ns()
@@ -217,7 +221,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
                     raise
         return wrapper
     @staticmethod
-    def exception_handling(func: _AnyCallable, group: click.Group, **attrs: t.Any) -> ClickFunctionWrapper[..., t.Any]:
+    def exception_handling(func: t.Callable[P, t.Any], group: click.Group, **attrs: t.Any) -> t.Callable[P, t.Any]:
         command_name = attrs.get("name", func.__name__)
         @functools.wraps(func)
         def wrapper(*args: P.args, **attrs: P.kwargs) -> t.Any:
@@ -225,7 +229,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
             except OpenLLMException as err:
                 raise click.ClickException(click.style(f"[{group.name}] '{command_name}' failed: " + err.message, fg="red")) from err
             except KeyboardInterrupt: pass
-        return t.cast("ClickFunctionWrapper[..., t.Any]", wrapper)
+        return wrapper
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         cmd_name = self.resolve_alias(cmd_name)
         if ctx.command.name in _start_mapping:
@@ -241,8 +245,24 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
     def list_commands(self, ctx: click.Context) -> list[str]:
         if ctx.command.name in {"start", "start-grpc"}: return list(CONFIG_MAPPING.keys())
         return super().list_commands(ctx)
+    # NOTE: The following overload are ported from click to make sure
+    # cli.command is correctly typed. See https://github.com/pallets/click/blob/main/src/click/decorators.py#L136
+    #
+    # variant: no call, directly as decorator for a function.
+    @overload
+    def command(self, name: _AnyCallable) -> click.Command: ...
+    # variant: with positional name and with positional or keyword cls argument:
+    # @command(namearg, CommandCls, ...) or @command(namearg, cls=CommandCls, ...)
+    @overload
+    def command(self, name: str | None, cls: type[CmdType], **attrs: t.Any) -> t.Callable[[_AnyCallable], CmdType]: ...
+    # variant: name omitted, cls _must_ be a keyword argument, @command(cmd=CommandCls, ...)
+    @overload
+    def command(self, name: None = None, *, cls: type[CmdType], **attrs: t.Any) -> t.Callable[[_AnyCallable], CmdType]: ...
+    # variant: with optional string name, no cls argument provided.
+    @overload
+    def command(self, name: t.Optional[str] = ..., cls: None = None, **attrs: t.Any) -> t.Callable[[_AnyCallable], click.Command]: ...
     @override
-    def command(self, *args: t.Any, **attrs: t.Any):
+    def command(self, name: str | None | _AnyCallable = None, cls: type[CmdType] | None = None, *args: t.Any, **attrs: t.Any) -> click.Command | t.Callable[[_AnyCallable], click.Command | CmdType]:
         """Override the default 'cli.command' with supports for aliases for given command, and it wraps the implementation with common parameters."""
         if "context_settings" not in attrs: attrs["context_settings"] = {}
         if "max_content_width" not in attrs["context_settings"]: attrs["context_settings"]["max_content_width"] = 120
@@ -251,6 +271,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
             name = f.__name__.lower()
             if name.endswith("_command"): name = name[:-8]
             name = name.replace("_", "-")
+            attrs.setdefault("cls", cls)
             attrs.setdefault("help", inspect.getdoc(f))
             attrs.setdefault("name", name)
 
@@ -262,7 +283,9 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
             wrapped = self.exception_handling(wrapped, self, **attrs)
 
             # move common parameters to end of the parameters list
-            wrapped.__click_params__ = wrapped.__click_params__[-self.NUMBER_OF_COMMON_PARAMS:] + wrapped.__click_params__[:-self.NUMBER_OF_COMMON_PARAMS]
+            _memo = getattr(wrapped, "__click_params__", None)
+            if _memo is None: raise RuntimeError("Click command not register correctly.")
+            _object_setattr(wrapped, "__click_params__", _memo[-self.NUMBER_OF_COMMON_PARAMS:] + _memo[:-self.NUMBER_OF_COMMON_PARAMS])
             # NOTE: we need to call super of super to avoid conflict with BentoMLCommandGroup command setup
             cmd = super(BentoMLCommandGroup, self).command(*args, **attrs)(wrapped)
             # NOTE: add aliases to a given commands if it is specified.
@@ -419,47 +442,9 @@ def import_command(
     else: termui.echo(_ref.tag)
     return _ref
 
-@overload
 def _start(
     model_name: str,
-    /,
-    model_id: str | None = ...,
-    timeout: int = ...,
-    workers_per_resource: t.Literal["conserved", "round_robin"] | float | None = ...,
-    device: tuple[str, ...] | t.Literal["all"] | None = ...,
-    quantize: t.Literal["int8", "int4", "gptq"] | None = ...,
-    bettertransformer: bool | None = ...,
-    runtime: t.Literal["ggml", "transformers"] = ...,
-    fast: bool = ...,
-    adapter_map: dict[t.LiteralString, str | None] | None = ...,
-    framework: LiteralRuntime | None = ...,
-    additional_args: ListStr | None = ...,
-    _serve_grpc: bool = ...,
-    __test__: t.Literal[False] = False,
-) -> LLMConfig:
-    ...
-@overload
-def _start(
-    model_name: str,
-    /,
-    model_id: str | None = ...,
-    timeout: int = ...,
-    workers_per_resource: t.Literal["conserved", "round_robin"] | float | None = ...,
-    device: tuple[str, ...] | t.Literal["all"] | None = ...,
-    quantize: t.Literal["int8", "int4", "gptq"] | None = ...,
-    bettertransformer: bool | None = ...,
-    runtime: t.Literal["ggml", "transformers"] = ...,
-    fast: bool = ...,
-    adapter_map: dict[t.LiteralString, str | None] | None = ...,
-    framework: LiteralRuntime | None = ...,
-    additional_args: ListStr | None = ...,
-    _serve_grpc: bool = ...,
-    __test__: t.Literal[True] = True,
-) -> subprocess.Popen[bytes]:
-    ...
-def _start(
-    model_name: str,
-    /,
+    /, *,
     model_id: str | None = None,
     timeout: int = 30,
     workers_per_resource: t.Literal["conserved", "round_robin"] | float | None = None,
@@ -473,6 +458,7 @@ def _start(
     additional_args: ListStr | None = None,
     _serve_grpc: bool = False,
     __test__: bool = False,
+    **_: t.Any,
 ) -> LLMConfig | subprocess.Popen[bytes]:
     """Python API to start a LLM server. These provides one-to-one mapping to CLI arguments.
 
@@ -551,7 +537,8 @@ def _build(
     runtime: t.Literal["ggml", "transformers"] = "transformers",
     dockerfile_template: str | None = None,
     overwrite: bool = False,
-    container_registry: LiteralContainerRegistry  = "gh",
+    container_registry: LiteralContainerRegistry | None = None,
+    container_version: str | None = None,
     push: bool = False,
     containerize: bool = False,
     serialisation_format: t.Literal["safetensors", "legacy"] = "safetensors",
@@ -600,6 +587,7 @@ def _build(
         containerize: Whether to containerize the Bento after building. '--containerize' is the shortcut of 'openllm build && bentoml containerize'.
                       Note that 'containerize' and 'push' are mutually exclusive
         container_registry: Container registry to choose the base OpenLLM container image to build from.
+        container_version: Optional container version to use for containerization. Default to the latest stable release of OpenLLM.
         serialisation_format: Serialisation for saving models. Default to 'safetensors', which is equivalent to `safe_serialization=True`
         additional_args: Additional arguments to pass to ``openllm build``.
         bento_store: Optional BentoStore for saving this BentoLLM. Default to the default BentoML local store.
@@ -619,8 +607,6 @@ def _build(
         runtime,
         "--serialisation",
         serialisation_format,
-        "--container-registry",
-        container_registry,
     ]
     if quantize and bettertransformer: raise OpenLLMException("'quantize' and 'bettertransformer' are currently mutually exclusive.")
     if quantize: args.extend(["--quantize", quantize])
@@ -636,6 +622,8 @@ def _build(
     if adapter_map: args.extend([f"--adapter-id={k}{':'+v if v is not None else ''}" for k, v in adapter_map.items()])
     if model_version: args.extend(["--model-version", model_version])
     if dockerfile_template: args.extend(["--dockerfile-template", dockerfile_template])
+    if container_registry: args.extend(["--container-registry", container_registry,
+                                        "--container-version", container_version if container_version is not None else ".".join([str(i) for i in pkg.pkg_version_info("openllm")])])
     if additional_args: args.extend(additional_args)
 
     try: output = subprocess.check_output(args, env=os.environ.copy(), cwd=build_ctx or os.getcwd())
@@ -731,13 +719,14 @@ start, start_grpc, build, import_model, list_models = codegen.gen_sdk(_start, _s
 @click.option("--dockerfile-template", default=None, type=click.File(), help="Optional custom dockerfile template to be used with this BentoLLM.")
 @serialisation_option
 @container_registry_option
+@click.option("--container-version", default=".".join([str(i) for i in pkg.pkg_version_info("openllm")]), help="Default container version for the image from '--container-registry'")
 @fast_option
 @cog.optgroup.group(cls=cog.MutuallyExclusiveOptionGroup, name="Utilities options")
 @cog.optgroup.option("--containerize", default=False, is_flag=True, type=click.BOOL, help="Whether to containerize the Bento after building. '--containerize' is the shortcut of 'openllm build && bentoml containerize'.")
 @cog.optgroup.option("--push", default=False, is_flag=True, type=click.BOOL, help="Whether to push the result bento to BentoCloud. Make sure to login with 'bentoml cloud login' first.")
 @click.pass_context
 def build_command(
-    ctx: click.Context,
+    ctx: click.Context, /,
     model_name: str,
     model_id: str | None,
     overwrite: bool,
@@ -756,7 +745,8 @@ def build_command(
     push: bool,
     serialisation_format: t.Literal["safetensors", "legacy"],
     fast: bool,
-    container_registry: LiteralContainerRegistry,
+    container_registry: LiteralContainerRegistry | None,
+    container_version: str,
     **attrs: t.Any,
 ) -> bentoml.Bento:
     """Package a given models into a Bento.
@@ -770,8 +760,9 @@ def build_command(
     > NOTE: To run a container built from this Bento with GPU support, make sure
     > to have https://github.com/NVIDIA/nvidia-container-toolkit install locally.
     """
-    local_container = attrs.pop(LOCAL_BUILD_KEY, False)
-    if local_container: termui.echo("Make sure that the image")
+    local_container, base_container_tag = attrs.pop(LOCAL_BUILD_KEY, False), bundle.CONTAINER_NAMES[container_registry] if container_registry else None
+    if local_container: termui.echo(f"Make sure the following OCI image is available in local container registry: '{base_container_tag}:{container_version}'" +
+                                    "\nTip: Run 'openllm ext build-base-container' for more information." if get_debug_mode() else "")
     if machine: output = "porcelain"
     if enable_features: enable_features = tuple(itertools.chain.from_iterable((s.split(",") for s in enable_features)))
 
@@ -838,7 +829,7 @@ def build_command(
                 if overwrite:
                     if output == "pretty": termui.echo(f"Overwriting existing Bento {bento_tag}", fg="yellow")
                     bentoml.delete(bento_tag)
-                    raise bentoml.exceptions.NotFound(f"Rebuilding existing Bento {bento_tag}")
+                    raise bentoml.exceptions.NotFound(f"Rebuilding existing Bento {bento_tag}") from None
                 _previously_built = True
             except bentoml.exceptions.NotFound:
                 bento = bundle.create_bento(
@@ -850,9 +841,10 @@ def build_command(
                     quantize=quantize,
                     bettertransformer=bettertransformer,
                     extra_dependencies=enable_features,
-                    build_ctx=build_ctx,
                     dockerfile_template=dockerfile_template_path,
                     runtime=runtime,
+                    container_registry=container_registry,
+                    container_version=container_version,
                 )
     except Exception as err: raise err from None
 
@@ -882,14 +874,14 @@ def build_command(
         backend = t.cast("DefaultBuilder", os.getenv("BENTOML_CONTAINERIZE_BACKEND", "docker"))
         try: bentoml.container.health(backend)
         except subprocess.CalledProcessError: raise OpenLLMException(f"Failed to use backend {backend}") from None
-        bentoml.container.build(bento.tag, backend=backend, features=("grpc","io"))
+        if not local_container:
+            if not base_container_tag: raise RuntimeError("Missing container tag. Make sure to pass '--container-registry'")
+            try: subprocess.check_output([backend, "pull", f"{base_container_tag}:{container_version}"])
+            except subprocess.CalledProcessError as err: raise click.ClickException(f"Failed to pull {base_container_tag}:\n{err}") from None
+        try: bentoml.container.build(bento.tag, backend=backend, features=("grpc","io"))
+        except Exception as err: raise OpenLLMException(f"Exception caught while containerizing '{bento.tag!s}':\n{err}") from err
     return bento
 
-
-@overload
-def models_command(ctx: click.Context, output: LiteralOutput, show_available: bool, machine: t.Literal[True] = True) -> DictStrAny: ...
-@overload
-def models_command(ctx: click.Context, output: LiteralOutput, show_available: bool, machine: t.Literal[False] = ...) -> None: ...
 @cli.command()
 @output_option
 @click.option("--show-available", is_flag=True, default=False, help="Show available models in local store (mutually exclusive with '-o porcelain').")
@@ -1102,10 +1094,6 @@ def instruct_command(endpoint: str, timeout: int, agent: t.LiteralString, output
         return result
     else: raise click.BadOptionUsage("agent", f"Unknown agent type {agent}")
 
-@overload
-def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[True] = True) -> EmbeddingsOutput: ...
-@overload
-def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, timeout: int, output: LiteralOutput, machine: t.Literal[False] = False) -> None: ...
 @cli.command()
 @shared_client_options(output_value="json")
 @click.option("--server-type", type=click.Choice(["grpc", "http"]), help="Server type", default="http", show_default=True)
@@ -1139,7 +1127,7 @@ def embed_command(ctx: click.Context, text: tuple[str, ...], endpoint: str, time
 @click.argument("prompt", type=click.STRING)
 @click.option("--sampling-params", help="Define query options. (format: ``--opt temperature=0.8 --opt=top_k:12)", required=False, multiple=True, callback=opt_callback, metavar="ARG=VALUE[,ARG=VALUE]")
 @click.pass_context
-def query_command(ctx: click.Context, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, _memoized: DictStrAny, **attrs: t.Any) -> None:
+def query_command(ctx: click.Context, /, prompt: str, endpoint: str, timeout: int, server_type: t.Literal["http", "grpc"], output: LiteralOutput, _memoized: DictStrAny, **attrs: t.Any) -> None:
     """Ask a LLM interactively, from a terminal.
 
     \b

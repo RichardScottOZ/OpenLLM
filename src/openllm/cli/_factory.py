@@ -94,7 +94,7 @@ def start_command_factory(group: click.Group, model: str, _context_settings: Dic
 
     command_attrs: DictStrAny = dict(
         name=llm_config["model_name"],
-        context_settings=_context_settings or {},
+        context_settings=_context_settings or termui.CONTEXT_SETTINGS,
         short_help=f"Start a LLMServer for '{model}'",
         aliases=[llm_config["start_name"]] if llm_config["name_type"] == "dasherize" else None,
         help=f"""\
@@ -128,7 +128,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
     @start_decorator(llm_config, serve_grpc=_serve_grpc)
     @click.pass_context
     def start_cmd(
-        ctx: click.Context,
+        ctx: click.Context, /,
         server_timeout: int,
         model_id: str | None,
         model_version: str | None,
@@ -184,11 +184,11 @@ Available official model_id(s): [default: {llm_config['default_id']}]
                 "BENTOML_HOME": os.getenv("BENTOML_HOME", BentoMLContainer.bentoml_home.get()),
                 "OPENLLM_ADAPTER_MAP": orjson.dumps(adapter_map).decode(),
                 "OPENLLM_SERIALIZATION": serialisation_format,
-                env.model_id: env.model_id_value,
                 env.runtime: env.runtime_value,
                 env.framework: env.framework_value,
             }
         )
+        if env.model_id_value: start_env[env.model_id] = str(env.model_id_value)
 
         llm = infer_auto_class(env.framework_value).for_model(
             model,
@@ -208,8 +208,7 @@ Available official model_id(s): [default: {llm_config['default_id']}]
         if bettertransformer is not None: start_env[env.bettertransformer] = str(env.bettertransformer_value)
         if quantize is not None: start_env[env.quantize] = str(env.quantize_value)
 
-        if _serve_grpc: server = bentoml.GrpcServer("_service.py:svc", **server_attrs)
-        else: server = bentoml.HTTPServer("_service.py:svc", **server_attrs)
+        server = bentoml.GrpcServer("_service.py:svc", **server_attrs) if _serve_grpc else bentoml.HTTPServer("_service.py:svc", **server_attrs)
         analytics.track_start_init(llm.config)
 
         def next_step(model_name: str, adapter_map: DictStrAny | None) -> None:
@@ -371,8 +370,9 @@ def model_id_option(f: _AnyCallable | None = None, *, model_env: EnvVarMixin | N
                                                                                                                                                        help="Optional model_id name or path for (fine-tune) weight.",  **attrs)(f)
 def model_version_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--model-version", type=click.STRING, default=None,
                                                                                                                    help="Optional model version to save for this model. It will be inferred automatically from model-id.", **attrs)(f)
-def model_name_argument(f: _AnyCallable | None = None, required: bool = True): return (click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required)(f) if f is not None
-                                                                               else click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required))
+def model_name_argument(f: _AnyCallable | None = None, required: bool = True) -> t.Callable[[FC], FC]:
+    arg = click.argument("model_name", type=click.Choice([inflection.dasherize(name) for name in CONFIG_MAPPING]), required=required)
+    return arg(f) if f is not None else arg
 def quantize_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--quantise", "--quantize", "quantize", type=click.Choice(["int8", "int4", "gptq"]), default=None,
                                                                                                                                                                             envvar=model_env.quantize if model_env is not None else None, show_envvar=model_env is not None,
                                                                                                                                                                             help="""Dynamic quantization for running this LLM.
@@ -407,37 +407,41 @@ def workers_per_resource_option(f: _AnyCallable | None = None, *, build: bool = 
 def bettertransformer_option(f: _AnyCallable | None = None, *, build: bool = False, model_env: EnvVarMixin | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--bettertransformer", is_flag=True, default=None, envvar=model_env.bettertransformer if model_env is not None else None, show_envvar=model_env is not None,
                                                                                                                                                                                      help="Apply FasterTransformer wrapper to serve model. This will applies during serving time." if not build else "Set default environment variable whether to serve this model with FasterTransformer in build time.",
                                                                                                                                                                                      **attrs)(f)
-def serialisation_option(f: _AnyCallable | None = None, **attrs: t.Any): return cli_option("--serialisation", "--serialization", "serialisation_format", type=click.Choice(["safetensors", "legacy"]),
-                                                                                           default="safetensors", show_default=True, show_envvar=True, envvar="OPENLLM_SERIALIZATION",
-                                                                                           help="""Serialisation format for save/load LLM.
+def serialisation_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--serialisation", "--serialization", "serialisation_format", type=click.Choice(["safetensors", "legacy"]),
+                                                                                                                   default="safetensors", show_default=True, show_envvar=True, envvar="OPENLLM_SERIALIZATION",
+                                                                                                                   help="""Serialisation format for save/load LLM.
 
-                                                                                           Currently the following strategies are supported:
+                                                                                                                   Currently the following strategies are supported:
 
-                                                                                           - ``safetensors``: This will use safetensors format, which is synonymous to
+                                                                                                                   - ``safetensors``: This will use safetensors format, which is synonymous to
 
-                                                                                                    \b
-                                                                                                    ``safe_serialization=True``.
+                                                                                                                               \b
+                                                                                                                               ``safe_serialization=True``.
 
-                                                                                                    \b
-                                                                                                    **Note** that this format might not work for every cases, and
-                                                                                                    you can always fallback to ``legacy`` if needed.
+                                                                                                                               \b
+                                                                                                                               **Note** that this format might not work for every cases, and
+                                                                                                                               you can always fallback to ``legacy`` if needed.
 
-                                                                                           - ``legacy``: This will use PyTorch serialisation format, often as ``.bin`` files.
-                                                                                                         This should be used if the model doesn't yet support safetensors.
+                                                                                                                   - ``legacy``: This will use PyTorch serialisation format, often as ``.bin`` files.
+                                                                                                                                   This should be used if the model doesn't yet support safetensors.
 
-                                                                                           **Note** that GGML format is working in progress.
-                                                                                           """, **attrs
-                                                                                        )(f)
-def container_registry_option(f: _AnyCallable | None = None, **attrs: t.Any): return cli_option("--container-registry", "container_registry", type=str, default="gh", show_default=True, show_envvar=True, envvar="OPENLLM_CONTAINER_REGISTRY",
-                                                                                                help="""The default container registry to get the base image for building BentoLLM.
+                                                                                                                   **Note** that GGML format is working in progress.
+                                                                                                                   """, **attrs
+                                                                                                                   )(f)
+def container_registry_option(f: _AnyCallable | None = None, **attrs: t.Any) -> t.Callable[[FC], FC]: return cli_option("--container-registry", "container_registry", type=str, default=None, show_default=True, show_envvar=True, envvar="OPENLLM_CONTAINER_REGISTRY",
+                                                                                                                        callback=container_registry_callback,
+                                                                                                                        help="""The default container registry to get the base image for building BentoLLM.
 
-                                                                                                Currently, it supports 'quay.io', 'ghcr.io', 'docker.io'
+                                                                                                                        Currently, it supports 'quay.io', 'ghcr.io', 'docker.io'
 
-                                                                                                ``--container-registry`` will also support the following syntax: ``--container-registry gh:local``. This will use the local image for better debugging
-                                                                                                experience. Note that this means you must use ``openllm ext build-base-container`` to make sure the base image is available locally.
+                                                                                                                        ``--container-registry`` will also support the following syntax: ``--container-registry gh:local``. This will use the image available in local container registry
+                                                                                                                        (be it docker, podman, etc.) instead of pulling. Note that this means you must use ``openllm ext build-base-container`` to make sure the base image is available locally.
 
-                                                                                                **Note** that in order to build the image, you will need a GPUs to compile custom kernel. See ``openllm ext build-base-container`` for more information.
-                                                                                                """)(f)
+                                                                                                                        \b
+                                                                                                                        If not local, then during `--containerize` it will try to pull the image first, then proceed to build.
+
+                                                                                                                        **Note** that in order to build the image, you will need a GPUs to compile custom kernel. See ``openllm ext build-base-container`` for more information.
+                                                                                                                        """)(f)
 
 _wpr_strategies = {"round_robin", "conserved"}
 def workers_per_resource_callback(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:

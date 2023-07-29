@@ -82,7 +82,7 @@ def get_base_container_tag() -> str:
     # from the root directory of openllm from this file
     except InvalidGitRepositoryError: return generate_hash_from_file(ROOT_DIR.resolve().__fspath__())
 
-def build_container(registries: LiteralContainerRegistry | t.Sequence[LiteralContainerRegistry] | None = None, push: bool = False) -> None:
+def build_container(registries: LiteralContainerRegistry | t.Sequence[LiteralContainerRegistry] | None = None, push: bool = False, machine: bool = False) -> dict[str | LiteralContainerRegistry, str]:
     try:
         if not _BUILDER.health(): raise Error
     except (Error, subprocess.CalledProcessError): raise RuntimeError("Building base container requires BuildKit (via Buildx) to be installed. See https://docs.docker.com/build/buildx/install/ for instalation instruction.") from None
@@ -91,14 +91,18 @@ def build_container(registries: LiteralContainerRegistry | t.Sequence[LiteralCon
     if not _module_location: raise RuntimeError("Failed to determine source location of 'openllm'. (Possible broken installation)")
     pyproject_path = pathlib.Path(_module_location).parent.parent / "pyproject.toml"
     if not pyproject_path.exists(): raise ValueError("This utility can only be run within OpenLLM git repository. Clone it first with 'git clone https://github.com/bentoml/OpenLLM.git'")
-    if registries is None: tags = tuple(f"{name}:{get_base_container_tag()}" for name in get_registry_mapping())  # Default loop through all registry item
+    tags: dict[str | LiteralContainerRegistry, str]
+    if not registries: tags = {alias: f"{name}:{get_base_container_tag()}" for alias, name in get_registry_mapping().items()}  # Default loop through all registry item
     else:
         if isinstance(registries, str): registries = [registries]
         else: registries = list(registries)
-        tags = tuple(f"{get_registry_mapping()[name]}:{get_base_container_tag()}" for name in registries)
+        tags = {name: f"{get_registry_mapping()[name]}:{get_base_container_tag()}" for name in registries}
     try:
-        _BUILDER.build(file=pathlib.Path(__file__).parent.joinpath("Dockerfile").resolve().__fspath__(), context_path=pyproject_path.parent.__fspath__(), tag=tags, push=push, progress="plain" if get_debug_mode() else "auto")
-    except Exception as err: raise OpenLLMException("Failed to containerize base container images (Scroll up to see error above, or set OPENLLMDEVDEBUG=True for more traceback)") from err
+        outputs = _BUILDER.build(file=pathlib.Path(__file__).parent.joinpath("Dockerfile").resolve().__fspath__(), context_path=pyproject_path.parent.__fspath__(), tag=tuple(tags.values()),
+                                 push=push, progress="plain" if get_debug_mode() else "auto", quiet=machine)
+        if machine and outputs is not None: tags["image_sha"] = outputs.decode("utf-8").strip()
+    except Exception as err: raise OpenLLMException(f"Failed to containerize base container images (Scroll up to see error above, or set OPENLLMDEVDEBUG=True for more traceback):\n{err}") from err
+    return tags
 
 @functools.lru_cache
 def _supported_registries() -> list[str]: return list(_CONTAINER_REGISTRY)
