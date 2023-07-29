@@ -186,7 +186,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
         @cog.optgroup.option( "--context", "cloud_context", envvar="BENTOCLOUD_CONTEXT", type=click.STRING, default=None, help="BentoCloud context name.", show_envvar=True)
         @click.pass_context
         @functools.wraps(f)
-        def wrapper(ctx: click.Context, quiet: bool, debug: bool, cloud_context: str | None, /, *args: P.args, **attrs: P.kwargs) -> t.Any:
+        def wrapper(ctx: click.Context, quiet: bool, debug: bool, cloud_context: str | None, *args: P.args, **attrs: P.kwargs) -> t.Any:
             ctx.obj = GlobalOptions(cloud_context=cloud_context)
             if quiet:
                 set_quiet_mode(True)
@@ -199,7 +199,7 @@ class OpenLLMCommandGroup(BentoMLCommandGroup):
     def usage_tracking(func: t.Callable[P, t.Any], group: click.Group, **attrs: t.Any) -> t.Callable[t.Concatenate[bool, P], t.Any]:
         command_name = attrs.get("name", func.__name__)
         @functools.wraps(func)
-        def wrapper(do_not_track: bool, /, *args: P.args, **attrs: P.kwargs) -> t.Any:
+        def wrapper(do_not_track: bool, *args: P.args, **attrs: P.kwargs) -> t.Any:
             if do_not_track:
                 with analytics.set_bentoml_tracking(): return func(*args, **attrs)
             start_time = time.time_ns()
